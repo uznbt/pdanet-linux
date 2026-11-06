@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/screenshots/icon.png" width="112" alt="PdaNet Linux icon">
+</p>
+
 # PdaNet Linux
 
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
@@ -29,6 +33,24 @@ phone's user-space network stack; the phone does not proxy ICMP.
 This project is not affiliated with PdaNet/FoxFi. It does not bypass
 registration, licensing, or carrier restrictions, and it requires the
 phone-side PdaNet app to be running and licensed normally.
+
+---
+
+## Screenshots
+
+![Connection setup and dashboard](docs/screenshots/dashboard-wide.png)
+
+<p align="center">
+  <img src="docs/screenshots/dashboard-compact.png" width="460" alt="Compact layout for tiled windows">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/settings.png" width="620" alt="Settings dialog">
+</p>
+
+The screenshots use the default Adwaita dark palette with the blue accent,
+not a desktop-specific theme. They show the disconnected state; traffic,
+uptime and the phone signal appear after a transport is connected.
 
 ---
 
