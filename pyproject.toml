@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdanet-linux"
+version = "0.1.0"
+description = "Unofficial PdaNet USB/Wi-Fi TUN client for Linux"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "GPL-3.0-or-later"}
+authors = [{name = "Unofficial community client"}]
+keywords = ["pdanet", "tethering", "usb", "wifi", "vpn", "tun"]
+classifiers = [
+  "Environment :: X11 Applications :: GTK",
+  "Environment :: Wayland",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Networking",
+]
+
+[project.scripts]
+pdanet-linux = "pdanet_linux.cli:main"
+
+[project.gui-scripts]
+pdanet-linux-gui = "pdanet_linux.gui:main"
+
+[tool.setuptools]
+packages = ["pdanet_linux"]

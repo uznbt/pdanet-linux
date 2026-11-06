@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=PdaNet Linux
+GenericName=Phone Tethering Client
+Comment=Unofficial PdaNet USB/Wi-Fi tethering client
+Exec=@BINDIR@/pdanet-linux gui
+Icon=io.github.pdanet.PdaNetLinux
+Terminal=false
+Type=Application
+Categories=Network;Utility;
+Keywords=pdanet;tether;usb;wifi;vpn;tun;
+StartupNotify=true
+StartupWMClass=io.github.pdanet.PdaNetLinux
