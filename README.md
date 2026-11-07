@@ -291,7 +291,8 @@ quirks:
 - `adb` from the Android platform tools
 - `polkit`/`pkexec` or `sudo`; `sudo ./tools/install.sh --passwordless`
   avoids per-connection prompts (see [No password prompts](#no-password-prompts-for-daily-use))
-- For the GUI: PyGObject, GTK 4 and libadwaita
+- For the GUI: PyGObject, GTK 4 and libadwaita 1.5 or newer (the AppImage
+  bundles all of them)
 - For Bluetooth: BlueZ (`bluetoothctl`), a running `bluetooth` service and
   kernel RFCOMM support
 - For WiFi Pairing and WiFi Share: NetworkManager with `nmcli`
@@ -348,7 +349,9 @@ from the [Releases](https://github.com/uznbt/pdanet-linux/releases) page.
 
 The native packages pull Python, PyGObject, GTK 4, libadwaita, `adb`, `pkexec`
 and `iproute2` from the distribution repository. They install the root helper,
-polkit action, desktop entry and icon. No `pip install` is needed.
+polkit action, desktop entry and icon. No `pip install` is needed. The GUI
+needs libadwaita 1.5 or newer; distributions that still ship an older release
+should use the AppImage.
 
 The AppImage bundles Python, PyGObject, GTK 4 and libadwaita, so it does not
 need a Python or GTK installation on the host. On first launch it asks once

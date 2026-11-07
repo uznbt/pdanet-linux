@@ -12,6 +12,7 @@ export XDG_DATA_DIRS="$HERE/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/sha
 # from their post-install script.  A cancelled prompt is harmless and the
 # application still starts in read-only/diagnostic mode.
 if [ ! -x /usr/local/libexec/pdanet-linux-helper ] \
+    && [ ! -x /usr/libexec/pdanet-linux-helper ] \
     && [ "${PDANET_SKIP_HELPER_INSTALL:-0}" != "1" ] \
     && command -v pkexec >/dev/null 2>&1; then
     pkexec "$HERE/usr/share/pdanet-linux/install-helper.sh" "$HERE" || true

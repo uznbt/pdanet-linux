@@ -2,13 +2,16 @@
 # Clean up the optional passwordless rule only when the package is really
 # being removed, not while it is being upgraded.
 #
-# Debian passes "remove" or "purge", RPM passes 0, and Arch passes 0 or 1.
+# Debian passes "remove" or "purge", RPM passes 0.  Arch and Alpine run the
+# removal script without arguments (their upgrades use a separate upgrade
+# script), so an empty argument also means a real removal.
+#
 # Leave user configuration alone; only remove a rule that points at the
 # helper path owned by this package.
 set -u
 
 case "${1:-}" in
-    remove|purge|0)
+    remove|purge|0|"")
         if [ -f /etc/sudoers.d/pdanet-linux ] \
             && grep -q '/usr/libexec/pdanet-linux-helper' \
                 /etc/sudoers.d/pdanet-linux 2>/dev/null; then

@@ -57,10 +57,10 @@ contents:
 overrides:
   deb:
     depends:
-      - python3
+      - python3 (>= 3.10)
       - python3-gi
       - gir1.2-gtk-4.0
-      - gir1.2-adw-1
+      - gir1.2-adw-1 (>= 1.5)
       - gir1.2-gdkpixbuf-2.0
       - adb
       - pkexec
@@ -72,10 +72,10 @@ overrides:
       - libnotify-bin
   rpm:
     depends:
-      - python3
+      - python3 >= 3.10
       - python3-gobject
       - gtk4
-      - libadwaita
+      - libadwaita >= 1.5
       - android-tools
       - polkit
       - iproute
@@ -86,19 +86,19 @@ overrides:
       - libnotify
   archlinux:
     depends:
-      - python
+      - python>=3.10
       - python-gobject
       - gtk4
-      - libadwaita
+      - libadwaita>=1.5
       - android-tools
       - polkit
       - iproute2
   apk:
     depends:
-      - python3
+      - python3>=3.10
       - py3-gobject3
       - gtk4.0
-      - libadwaita
+      - libadwaita>=1.5
       - android-tools
       - polkit
       - iproute2
