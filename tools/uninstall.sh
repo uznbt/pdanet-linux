@@ -62,4 +62,11 @@ if command -v update-desktop-database >/dev/null 2>&1; then
     "${SUDO[@]}" update-desktop-database "$DATADIR/applications" \
         >/dev/null 2>&1 || true
 fi
+# GtkIconTheme trusts the cache even after the icon file is gone.  Refresh it
+# so the next lookup does not keep returning the removed /usr/local icon.
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    "${SUDO[@]}" gtk-update-icon-cache -q -t -f \
+        "$DATADIR/icons/hicolor" >/dev/null 2>&1 \
+        || "${SUDO[@]}" rm -f "$DATADIR/icons/hicolor/icon-theme.cache"
+fi
 printf 'PdaNet Linux removed.\n'

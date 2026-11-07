@@ -78,16 +78,65 @@ def _hint(text: str) -> Gtk.Label:
     return label
 
 
-def _welcome_icon() -> Gtk.Image:
-    """Return the app icon when it is installed, with a theme fallback."""
+def _app_icon_file() -> str | None:
+    """Return an existing app icon file, ignoring stale icon-theme caches.
+
+    GtkIconTheme trusts its cache without checking that the cached files
+    still exist.  A source-tree uninstall can therefore leave a cache entry
+    that points at a removed /usr/local icon, making has_icon() report true
+    and Gtk.Image render the image-missing placeholder.  Verify the file and
+    fall back to the known install locations for the current process.
+    """
     display = Gdk.Display.get_default()
     if display is not None:
         theme = Gtk.IconTheme.get_for_display(display)
-        if theme.has_icon(__app_id__):
-            image = Gtk.Image.new_from_icon_name(__app_id__)
-        else:
-            image = Gtk.Image.new_from_icon_name("network-vpn-symbolic")
-    else:
+        info = theme.lookup_icon(
+            __app_id__,
+            None,
+            128,
+            1,
+            Gtk.TextDirection.NONE,
+            Gtk.IconLookupFlags(0),
+        )
+        if info is not None:
+            gfile = info.get_file()
+            path = gfile.get_path() if gfile is not None else None
+            if path and os.path.isfile(path):
+                return path
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "share"
+    )
+    data_dirs = os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share"
+    candidates = [
+        os.path.join(here, os.pardir, "data", f"{__app_id__}.svg"),
+        os.path.join(here, os.pardir, "data", f"{__app_id__}.png"),
+    ]
+    for base in (data_home, *data_dirs.split(":"), "/usr/local/share", "/usr/share"):
+        if not base:
+            continue
+        candidates.append(
+            os.path.join(
+                base, "icons", "hicolor", "scalable", "apps", f"{__app_id__}.svg"
+            )
+        )
+        candidates.append(
+            os.path.join(
+                base, "icons", "hicolor", "256x256", "apps", f"{__app_id__}.png"
+            )
+        )
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    return None
+
+
+def _welcome_icon() -> Gtk.Image:
+    """Return the app icon, with a theme fallback for incomplete installs."""
+    path = _app_icon_file()
+    image = Gtk.Image.new_from_file(path) if path else Gtk.Image()
+    if image.get_paintable() is None:
         image = Gtk.Image.new_from_icon_name("network-vpn-symbolic")
     image.set_pixel_size(84)
     image.set_halign(Gtk.Align.CENTER)

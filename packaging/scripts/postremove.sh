@@ -10,6 +10,15 @@
 # helper path owned by this package.
 set -u
 
+refresh_icon_cache() {
+    directory="$1"
+    [ -d "$directory" ] || return 0
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -q -t -f "$directory" >/dev/null 2>&1 \
+            || rm -f "$directory/icon-theme.cache"
+    fi
+}
+
 case "${1:-}" in
     remove|purge|0|"")
         if [ -f /etc/sudoers.d/pdanet-linux ] \
@@ -20,9 +29,8 @@ case "${1:-}" in
         if command -v update-desktop-database >/dev/null 2>&1; then
             update-desktop-database -q /usr/share/applications || true
         fi
-        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-            gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
-        fi
+        refresh_icon_cache /usr/share/icons/hicolor
+        refresh_icon_cache /usr/local/share/icons/hicolor
         ;;
 esac
 
