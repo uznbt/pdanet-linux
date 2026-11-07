@@ -1,0 +1,108 @@
+# Shared package metadata for the nFPM-based distro packages.
+#
+# Build with tools/build-packages.sh, which stages the application tree in
+# build/pkgroot and sets VERSION.  The package is architecture-independent:
+# all code is Python and the privileged helper is a Python wrapper.
+name: pdanet-linux
+arch: all
+platform: linux
+version: ${VERSION}
+release: "1"
+section: net
+priority: optional
+maintainer: Unofficial community client <noreply@example.invalid>
+vendor: Unofficial community client
+homepage: https://github.com/uznbt/pdanet-linux
+license: GPL-3.0-or-later
+description: |
+  Unofficial PdaNet USB/Wi-Fi/Bluetooth client for Linux.
+  It creates a TUN interface, relays IPv4 packets to the PdaNet server on an
+  Android phone, and provides a GTK4/libadwaita GUI, a CLI, a tray icon and a
+  reverse-tether server. The phone-side PdaNet+ app must be installed and
+  licensed normally; this package does not bypass registration.
+
+depends:
+  - python3
+  - python3-gi
+  - gir1.2-gtk-4.0
+  - gir1.2-adw-1
+  - gir1.2-gdkpixbuf-2.0
+  - adb
+  - pkexec
+  - iproute2
+
+contents:
+  - src: build/pkgroot/usr/bin/pdanet-linux
+    dst: /usr/bin/pdanet-linux
+  - src: build/pkgroot/usr/libexec/pdanet-linux-helper
+    dst: /usr/libexec/pdanet-linux-helper
+  - src: build/pkgroot/usr/lib/pdanet-linux/
+    dst: /usr/lib/pdanet-linux
+    type: tree
+  - src: build/pkgroot/usr/share/applications/io.github.pdanet.PdaNetLinux.desktop
+    dst: /usr/share/applications/io.github.pdanet.PdaNetLinux.desktop
+  - src: build/pkgroot/usr/share/icons/hicolor/scalable/apps/io.github.pdanet.PdaNetLinux.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/io.github.pdanet.PdaNetLinux.svg
+  - src: build/pkgroot/usr/share/polkit-1/actions/io.github.pdanet.PdaNetLinux.policy
+    dst: /usr/share/polkit-1/actions/io.github.pdanet.PdaNetLinux.policy
+  - src: LICENSE
+    dst: /usr/share/doc/pdanet-linux/copyright
+    file_info:
+      mode: 0644
+  - src: README.md
+    dst: /usr/share/doc/pdanet-linux/README.md
+    file_info:
+      mode: 0644
+
+overrides:
+  deb:
+    depends:
+      - python3
+      - python3-gi
+      - gir1.2-gtk-4.0
+      - gir1.2-adw-1
+      - gir1.2-gdkpixbuf-2.0
+      - adb
+      - pkexec
+      - iproute2
+    recommends:
+      - bluez
+      - network-manager
+      - iptables
+      - libnotify-bin
+  rpm:
+    depends:
+      - python3
+      - python3-gobject
+      - gtk4
+      - libadwaita
+      - android-tools
+      - polkit
+      - iproute
+    recommends:
+      - bluez
+      - NetworkManager
+      - iptables
+      - libnotify
+  archlinux:
+    depends:
+      - python
+      - python-gobject
+      - gtk4
+      - libadwaita
+      - android-tools
+      - polkit
+      - iproute2
+  apk:
+    depends:
+      - python3
+      - py3-gobject3
+      - gtk4.0
+      - libadwaita
+      - android-tools
+      - polkit
+      - iproute2
+
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  postremove: packaging/scripts/postremove.sh

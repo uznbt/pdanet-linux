@@ -5,10 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pwd
+import re
 import secrets
 import shutil
 import signal
 import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -646,6 +649,121 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return _serve_start(args)
 
 
+def _find_visudo() -> str | None:
+    found = shutil.which("visudo")
+    if found:
+        return found
+    for candidate in (
+        "/usr/sbin/visudo",
+        "/usr/local/sbin/visudo",
+        "/usr/bin/visudo",
+    ):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def cmd_passwordless(args: argparse.Namespace) -> int:
+    """Install or remove a sudoers rule limited to the PdaNet helper."""
+    path = "/etc/sudoers.d/pdanet-linux"
+    if os.geteuid() != 0:
+        print(
+            "error: run this command with sudo:\n"
+            "       sudo pdanet-linux passwordless",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.remove:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(f"error: cannot remove {path}: {exc}", file=sys.stderr)
+            return 1
+        print("Passwordless helper rule removed.")
+        return 0
+
+    helper = privileges.find_helper()
+    if not helper:
+        print(
+            "error: the root helper is not installed; install the distro "
+            "package or run sudo ./tools/install.sh first",
+            file=sys.stderr,
+        )
+        return 1
+    if not re.fullmatch(r"[A-Za-z0-9/._+-]+", helper):
+        print(f"error: unsupported characters in helper path: {helper}", file=sys.stderr)
+        return 1
+
+    user = args.user or os.environ.get("SUDO_USER", "")
+    if not user:
+        print(
+            "error: cannot determine the desktop user; pass --user NAME",
+            file=sys.stderr,
+        )
+        return 1
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", user) or user.startswith("-"):
+        print(f"error: unsupported user name: {user}", file=sys.stderr)
+        return 1
+    try:
+        pwd.getpwnam(user)
+    except KeyError:
+        print(f"error: unknown user: {user}", file=sys.stderr)
+        return 1
+
+    visudo = _find_visudo()
+    if not visudo:
+        print("error: visudo was not found; cannot validate the rule", file=sys.stderr)
+        return 1
+    try:
+        os.makedirs("/etc/sudoers.d", mode=0o750, exist_ok=True)
+    except OSError as exc:
+        print(f"error: cannot create /etc/sudoers.d: {exc}", file=sys.stderr)
+        return 1
+
+    fd, temp_path = tempfile.mkstemp(prefix="pdanet-linux.", dir="/etc/sudoers.d")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(
+                "# Installed by pdanet-linux passwordless.\n"
+                "# Allows only the PdaNet TUN helper, not general sudo.\n"
+                f"{user} ALL=(root) NOPASSWD: {helper}\n"
+            )
+        check = subprocess.run(
+            [visudo, "-cf", temp_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if check.returncode != 0:
+            print(
+                "error: the generated sudoers rule is invalid:\n"
+                + (check.stderr or check.stdout).strip(),
+                file=sys.stderr,
+            )
+            return 1
+        os.chmod(temp_path, 0o440)
+        os.chown(temp_path, 0, 0)
+        os.replace(temp_path, path)
+        temp_path = ""
+    except OSError as exc:
+        print(f"error: cannot install {path}: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+
+    print(f"Passwordless helper enabled for {user}: {helper}")
+    return 0
+
+
 def cmd_doctor(_args: argparse.Namespace) -> int:
     print(f"{PROG} {__version__}")
     print(f"python: {sys.version.split()[0]} ({sys.executable})")
@@ -699,7 +817,7 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
         + (
             "yes"
             if info["passwordless"]
-            else "no (install with --passwordless to avoid prompts)"
+            else "no (run 'sudo pdanet-linux passwordless' to avoid prompts)"
         )
     )
     print(f"polkit helper lock: {os.path.exists(netconfig.LOCK_PATH)}")
@@ -917,6 +1035,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_doc = sub.add_parser("doctor", help="check the local environment")
     p_doc.set_defaults(func=cmd_doctor)
+
+    p_pw = sub.add_parser(
+        "passwordless",
+        help="allow only the installed root helper without a password prompt "
+             "(run with sudo)",
+    )
+    p_pw.add_argument(
+        "--user",
+        help="desktop user for the rule (default: SUDO_USER)",
+    )
+    p_pw.add_argument(
+        "--remove",
+        action="store_true",
+        help="remove /etc/sudoers.d/pdanet-linux",
+    )
+    p_pw.set_defaults(func=cmd_passwordless)
 
     p_gui = sub.add_parser("gui", help="start the GTK4 application")
     p_gui.set_defaults(func=cmd_gui)

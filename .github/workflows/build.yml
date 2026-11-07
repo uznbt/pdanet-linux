@@ -42,8 +42,8 @@ jobs:
       - name: Run test suite
         run: python3 -m unittest discover -s tests -v
 
-  build:
-    name: Build packages
+  python-packages:
+    name: Python packages
     needs: test
     runs-on: ubuntu-24.04
     steps:
@@ -59,44 +59,155 @@ jobs:
         run: python3 -m pip install --disable-pip-version-check --upgrade build
 
       - name: Build sdist and wheel
-        run: python3 -m build
+        run: |
+          rm -rf dist build ./*.egg-info
+          python3 -m build
 
-      - name: Build source archive and checksums
+      - name: Build source archive
         env:
           REF_NAME: ${{ github.ref_name }}
         run: |
           safe_ref="${REF_NAME//\//-}"
-          mkdir -p dist
           git archive \
             --format=tar.gz \
             --prefix="pdanet-linux-${safe_ref}/" \
             -o "dist/pdanet-linux-${safe_ref}.tar.gz" \
             HEAD
-          cd dist
-          sha256sum * > SHA256SUMS
 
-      - name: Upload build artifacts
+      - name: Upload Python packages
         uses: actions/upload-artifact@v7
         with:
-          name: pdanet-linux
+          name: python-packages
           path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  distro-packages:
+    name: Distro packages
+    needs: test
+    runs-on: ubuntu-24.04
+    env:
+      NFPM_VERSION: '2.48.0'
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v7
+
+      - name: Install nFPM
+        run: |
+          base="https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}"
+          curl -fsSL --retry 3 -o /tmp/nfpm.tar.gz \
+            "${base}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSL --retry 3 -o /tmp/nfpm-checksums.txt \
+            "${base}/checksums.txt"
+          expected="$(awk '/nfpm_'"${NFPM_VERSION}"'_Linux_x86_64\.tar\.gz$/ {print $1}' \
+            /tmp/nfpm-checksums.txt)"
+          test -n "$expected"
+          echo "$expected  /tmp/nfpm.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/nfpm.tar.gz -C /usr/local/bin nfpm
+          nfpm --version
+
+      - name: Build deb, rpm, Arch, APK and portable tree
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          if [ "$REF_TYPE" = "tag" ]; then
+            export VERSION="${REF_NAME#v}"
+          else
+            export VERSION="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' pdanet_linux/__init__.py)"
+          fi
+          ./tools/build-packages.sh
+
+      - name: Upload distro packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: distro-packages
+          path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.pkg.tar.zst
+            dist/*.apk
+            dist/*-linux-any.tar.xz
+          if-no-files-found: error
+          retention-days: 14
+
+  appimage:
+    name: AppImage
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v7
+
+      - name: Install AppImage build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3 \
+            python3-venv \
+            python3-pip \
+            python3-gi \
+            python3-gi-cairo \
+            gir1.2-gtk-4.0 \
+            gir1.2-adw-1 \
+            libgtk-4-1 \
+            libadwaita-1-0 \
+            libgdk-pixbuf-2.0-0 \
+            librsvg2-bin \
+            adwaita-icon-theme \
+            desktop-file-utils \
+            file \
+            zsync
+
+      - name: Install PyInstaller
+        run: |
+          python3 -m venv --system-site-packages build/venv
+          build/venv/bin/pip install --disable-pip-version-check \
+            --upgrade pip 'pyinstaller==6.22.3'
+
+      - name: Build self-contained AppImage
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          if [ "$REF_TYPE" = "tag" ]; then
+            export VERSION="${REF_NAME#v}"
+          else
+            export VERSION="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' pdanet_linux/__init__.py)"
+          fi
+          PATH="$PWD/build/venv/bin:$PATH" ./tools/build-appimage.sh
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v7
+        with:
+          name: appimage
+          path: dist/*.AppImage
           if-no-files-found: error
           retention-days: 14
 
   release:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, build]
+    needs: [test, python-packages, distro-packages, appimage]
     runs-on: ubuntu-24.04
     permissions:
       contents: write # Required to upload assets to the GitHub Release
 
     steps:
-      - name: Download build artifacts
+      - name: Download all build artifacts
         uses: actions/download-artifact@v8
         with:
-          name: pdanet-linux
+          pattern: '*'
           path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' \
+            | sort \
+            | xargs -r sha256sum > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v3

@@ -201,12 +201,16 @@ if [ "$PASSWORDLESS" -eq 1 ]; then
     say "Passwordless helper enabled for user: $target_user"
 fi
 
-if command -v update-desktop-database >/dev/null 2>&1; then
-    "${SUDO[@]}" update-desktop-database "$DEST_APPDIR" || true
-fi
-if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-    "${SUDO[@]}" gtk-update-icon-cache -f -t \
-        "$DESTDIR$DATADIR/icons/hicolor" >/dev/null 2>&1 || true
+# Distro packaging stages the tree with DESTDIR and runs these caches from
+# the package post-install script on the target system instead.
+if [ -z "$DESTDIR" ]; then
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        "${SUDO[@]}" update-desktop-database "$DEST_APPDIR" || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        "${SUDO[@]}" gtk-update-icon-cache -f -t \
+            "$DESTDIR$DATADIR/icons/hicolor" >/dev/null 2>&1 || true
+    fi
 fi
 
 say

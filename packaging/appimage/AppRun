@@ -1,0 +1,20 @@
+#!/bin/sh
+# AppImage launcher for PdaNet Linux.
+set -eu
+
+HERE="$(dirname "$(readlink -f "$0")")"
+export APPDIR="$HERE"
+export PATH="$HERE/usr/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
+export XDG_DATA_DIRS="$HERE/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+
+# The TUN helper needs root, so it cannot run from the read-only AppImage
+# mount.  Install a stable root-owned copy once; the package formats do this
+# from their post-install script.  A cancelled prompt is harmless and the
+# application still starts in read-only/diagnostic mode.
+if [ ! -x /usr/local/libexec/pdanet-linux-helper ] \
+    && [ "${PDANET_SKIP_HELPER_INSTALL:-0}" != "1" ] \
+    && command -v pkexec >/dev/null 2>&1; then
+    pkexec "$HERE/usr/share/pdanet-linux/install-helper.sh" "$HERE" || true
+fi
+
+exec "$HERE/usr/lib/pdanet-linux/pdanet-linux" "$@"

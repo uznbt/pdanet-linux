@@ -309,8 +309,8 @@ Install examples:
 
 ```bash
 # Debian / Ubuntu
-sudo apt install python3 android-sdk-platform-tools-common adb iproute2 \
-    policykit-1 python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 bluez \
+sudo apt install python3 adb iproute2 pkexec python3-gi \
+    gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-gdkpixbuf-2.0 bluez \
     network-manager libnotify-bin iptables
 
 # Fedora
@@ -331,7 +331,40 @@ Package names vary by distribution; `adb` is often in
 
 ## Installation
 
-### System installation (recommended)
+### Prebuilt packages
+
+Every tagged release is built by GitHub Actions; the `.deb`, `.rpm`, Arch,
+Alpine and AppImage files are not committed to the repository. Download them
+from the [Releases](https://github.com/uznbt/pdanet-linux/releases) page.
+
+| Format | Install |
+|---|---|
+| Debian / Ubuntu | `sudo apt install ./pdanet-linux_*.deb` |
+| Fedora / RHEL | `sudo dnf install ./pdanet-linux-*.rpm` |
+| Arch / Manjaro | `sudo pacman -U pdanet-linux-*.pkg.tar.zst` |
+| Alpine | `sudo apk add --allow-untrusted pdanet-linux-*.apk` |
+| Any glibc desktop | `chmod +x pdanet-linux-*.AppImage && ./pdanet-linux-*.AppImage` |
+| Portable tree | `tar -xJf pdanet-linux-*-linux-any.tar.xz -C /` as root |
+
+The native packages pull Python, PyGObject, GTK 4, libadwaita, `adb`, `pkexec`
+and `iproute2` from the distribution repository. They install the root helper,
+polkit action, desktop entry and icon. No `pip install` is needed.
+
+The AppImage bundles Python, PyGObject, GTK 4 and libadwaita, so it does not
+need a Python or GTK installation on the host. On first launch it asks once
+through `pkexec` to install the small root helper into
+`/usr/local/libexec/pdanet-linux-helper`; the application still opens if you
+cancel. Set `PDANET_SKIP_HELPER_INSTALL=1` to skip that prompt. The AppImage
+requires FUSE 2 for normal mounting; if FUSE is unavailable, run it with
+`APPIMAGE_EXTRACT_AND_RUN=1`.
+
+Snap and Flatpak are deliberately not published. Both sandboxes prevent the
+unprivileged application from creating a TUN interface and changing policy
+routes, and the privileged helper would need a host escape anyway. The native
+packages and the AppImage cover the same distributions without weakening the
+security model.
+
+### System installation from source
 
 ```bash
 cd pdanet-linux
@@ -354,10 +387,17 @@ copy (`cp -r pdanet_linux ...`); always reinstall with `sudo
 
 By default the GUI starts the helper through pkexec and the CLI through
 sudo, so the desktop asks for authentication when a tunnel starts. For a
-one-time install that avoids those prompts:
+one-time install that avoids those prompts from a source checkout:
 
 ```bash
 sudo ./tools/install.sh --passwordless
+```
+
+Installed distro packages can do the same without the source tree:
+
+```bash
+sudo pdanet-linux passwordless
+sudo pdanet-linux passwordless --remove
 ```
 
 The installer validates and writes `/etc/sudoers.d/pdanet-linux`:
@@ -366,13 +406,15 @@ The installer validates and writes `/etc/sudoers.d/pdanet-linux`:
 youruser ALL=(root) NOPASSWD: /usr/local/libexec/pdanet-linux-helper
 ```
 
-The rule is limited to the installed PdaNet helper; it does not grant
+A distro package uses `/usr/libexec/pdanet-linux-helper` instead. The rule is
+limited to the installed PdaNet helper; it does not grant
 general sudo. The default `auto` privilege mode then starts the helper with
 `sudo -n` and no prompt. `pdanet-linux doctor` reports
 `sudo passwordless: yes` when the rule is active.
 
 A later `sudo ./tools/install.sh` upgrade leaves the rule in place, and
-`tools/uninstall.sh` removes it. The rule lets your user create and
+`tools/uninstall.sh` removes it. For a distro package, use
+`sudo pdanet-linux passwordless --remove`. The rule lets your user create and
 configure TUN interfaces, policy routes, DNS settings and the reverse-mode
 firewall/NAT chains without a password. That is a privileged networking
 capability, so only enable it on a machine you trust.
@@ -831,9 +873,16 @@ pull request and manual dispatch. The tests use the distribution Python with
 `python3-gi`, GTK 4 and libadwaita, so the tray protocol is exercised with the
 same typelibs as a normal installation.
 
-Pushing a tag such as `v0.1.0` also builds the sdist, wheel and a `git
-archive` source tarball. The workflow publishes all assets plus `SHA256SUMS`
-to the GitHub Release:
+On every push it also builds:
+
+- sdist, wheel and a `git archive` source tarball;
+- `.deb`, `.rpm`, Arch `.pkg.tar.zst`, Alpine `.apk` and a portable
+  `tar.xz` tree through nFPM;
+- a self-contained x86_64 AppImage built with PyInstaller on Ubuntu 24.04.
+
+Pushing a tag such as `v0.1.0` publishes all of those files plus
+`SHA256SUMS` to the GitHub Release. Nothing is uploaded from a developer
+machine:
 
 ```bash
 git tag v0.1.0
@@ -863,8 +912,12 @@ git push origin v0.1.0
 | `pdanet_linux/cli.py` | Command-line interface |
 | `pdanet_linux/gui.py` | GTK4/libadwaita application |
 | `pdanet_linux/mock_server.py` | Offline protocol simulator |
-| `.github/workflows/build.yml` | CI tests and tagged release assets |
+| `packaging/nfpm.yaml` | Shared deb/rpm/Arch/Alpine package metadata |
+| `packaging/appimage/` | PyInstaller entry points, AppRun and one-time helper installer |
+| `.github/workflows/build.yml` | CI tests, distro packages, AppImage and tagged release assets |
 | `tools/install.sh` | System installer, polkit action and desktop entry |
+| `tools/build-packages.sh` | nFPM packaging driver used by CI |
+| `tools/build-appimage.sh` | Self-contained AppImage builder used by CI |
 
 ---
 
