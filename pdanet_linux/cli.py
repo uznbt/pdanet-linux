@@ -612,6 +612,10 @@ def _serve_start(args: argparse.Namespace) -> int:
             "  Phone   : connect to the laptop hotspot, open PdaNet+, then "
             "choose 'Connect to a PdaNet Hotspot'."
         )
+        print(
+            "  Note    : the laptop needs its own Internet upstream; one "
+            "Wi-Fi adapter cannot also join the phone's hotspot."
+        )
         print("Press Ctrl+C to stop.")
         try:
             srv.wait()
