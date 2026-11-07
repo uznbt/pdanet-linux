@@ -467,7 +467,14 @@ class PdaNetWindow(Adw.ApplicationWindow):
 
     def _install_css(self) -> None:
         provider = Gtk.CssProvider()
-        provider.load_from_data(_WINDOW_CSS)
+        # GTK 4.12 added load_from_string and deprecated load_from_data; newer
+        # GTK releases no longer expose the length argument that GTK 4.10 and
+        # older required.  Pick the API that the running GTK provides.
+        load_from_string = getattr(provider, "load_from_string", None)
+        if load_from_string is not None:
+            load_from_string(_WINDOW_CSS.decode("utf-8"))
+        else:
+            provider.load_from_data(_WINDOW_CSS, len(_WINDOW_CSS))
         display = Gdk.Display.get_default()
         if display is not None:
             Gtk.StyleContext.add_provider_for_display(

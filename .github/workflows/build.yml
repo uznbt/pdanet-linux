@@ -155,6 +155,8 @@ jobs:
             libgdk-pixbuf-2.0-0 \
             librsvg2-bin \
             adwaita-icon-theme \
+            dbus \
+            xvfb \
             desktop-file-utils \
             file \
             zsync
@@ -176,6 +178,29 @@ jobs:
             export VERSION="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' pdanet_linux/__init__.py)"
           fi
           PATH="$PWD/build/venv/bin:$PATH" ./tools/build-appimage.sh
+
+      # A successful build does not prove that the frozen GTK application can
+      # start.  Run it once on a virtual display and fail on any Python
+      # traceback; the timeout is the normal shutdown path.
+      - name: Smoke-test AppImage
+        run: |
+          chmod +x dist/*.AppImage
+          mkdir -p build/smoke-config
+          set +e
+          timeout 20 dbus-run-session -- xvfb-run -a env \
+            APPIMAGE_EXTRACT_AND_RUN=1 \
+            PDANET_SKIP_HELPER_INSTALL=1 \
+            XDG_CONFIG_HOME="$PWD/build/smoke-config" \
+            XDG_STATE_HOME="$PWD/build/smoke-config" \
+            ./dist/*.AppImage >build/smoke.log 2>&1
+          status=$?
+          set -e
+          cat build/smoke.log
+          if grep -q 'Traceback (most recent call last)' build/smoke.log; then
+            echo "error: AppImage startup raised a Python exception" >&2
+            exit 1
+          fi
+          test "$status" -eq 124
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v7
