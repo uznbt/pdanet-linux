@@ -579,6 +579,18 @@ class NetConfigurator:
             )
             self._remove_stale_link()
         elif self.config.role == ROLE_SERVER:
+            # A crashed client may have left policy rules and an IPv6 guard
+            # behind; the server does not add them, but it must not leave
+            # the machine with a broken IPv6 default.  The lock above proves
+            # that no live PdaNet process still owns them.
+            self._remove_ipv6_guard()
+            self._del_all_rules()
+            self._del_all_rules6()
+            run_ip("route", "flush", "table", str(ROUTE_TABLE), check=False)
+            run_ip(
+                "-6", "route", "flush", "table", str(ROUTE_TABLE),
+                check=False,
+            )
             self._remove_stale_link()
 
         # Try a few names so a stale interface does not block startup.

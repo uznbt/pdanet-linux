@@ -344,6 +344,10 @@ unreachable 2001:db8:dead::/48 metric 4278198272 pref medium
         self.assertTrue(any("addr replace 10.1.19.1/24 dev pdanet0" in c for c in flat_ip))
         self.assertFalse(any("route replace default" in c for c in flat_ip))
         self.assertFalse(any("rule add" in c for c in flat_ip))
+        self.assertTrue(any("rule del" in c for c in flat_ip))
+        self.assertTrue(
+            any("route flush table 51820" in c for c in flat_ip)
+        )
         self.assertTrue(any("link del pdanet0" in c for c in flat_ip))
 
         flat_ipt = [" ".join(call) for call in ipt_calls]
