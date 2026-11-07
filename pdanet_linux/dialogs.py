@@ -9,20 +9,24 @@ from __future__ import annotations
 
 import os
 import secrets
+import shutil
 import socket
 import subprocess
 import threading
 import time
+from dataclasses import replace
 from typing import Callable
 
 import gi
 
 gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from . import (  # noqa: E402
+    __app_id__,
     bt,
     config,
     netconfig,
@@ -72,6 +76,229 @@ def _hint(text: str) -> Gtk.Label:
     label.add_css_class("caption")
     label.add_css_class("dim-label")
     return label
+
+
+def _welcome_icon() -> Gtk.Image:
+    """Return the app icon when it is installed, with a theme fallback."""
+    display = Gdk.Display.get_default()
+    if display is not None:
+        theme = Gtk.IconTheme.get_for_display(display)
+        if theme.has_icon(__app_id__):
+            image = Gtk.Image.new_from_icon_name(__app_id__)
+        else:
+            image = Gtk.Image.new_from_icon_name("network-vpn-symbolic")
+    else:
+        image = Gtk.Image.new_from_icon_name("network-vpn-symbolic")
+    image.set_pixel_size(84)
+    image.set_halign(Gtk.Align.CENTER)
+    return image
+
+
+def _readiness_icon(ok: bool) -> Gtk.Image:
+    image = Gtk.Image.new_from_icon_name(
+        "object-select-symbolic" if ok else "dialog-warning-symbolic"
+    )
+    if not ok:
+        image.add_css_class("warning")
+    return image
+
+
+class SetupDialog(Adw.Dialog):
+    """First-run welcome and default connection setup.
+
+    The dialog is deliberately advisory: a missing adb or helper does not
+    block the user from exploring the app.  The phone-side PdaNet+ app must
+    still be licensed and running normally.
+    """
+
+    _MODES = ("usb", "wifi", "bluetooth")
+    _MODE_LABELS = ("USB (recommended)", "Wi-Fi", "Bluetooth")
+
+    def __init__(
+        self,
+        settings: config.Settings,
+        on_save: Callable[[config.Settings], None],
+    ) -> None:
+        super().__init__()
+        self.set_title("Welcome to PdaNet Linux")
+        self.set_content_width(620)
+        self.set_content_height(700)
+        self._settings = settings
+        self._on_save = on_save
+        self._saved = False
+        self.connect("closed", self._on_closed)
+
+        toolbar = Adw.ToolbarView()
+        toolbar.add_top_bar(_dialog_header("Welcome", self))
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_vexpand(True)
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        clamp = Adw.Clamp()
+        clamp.set_maximum_size(580)
+        clamp.set_tightening_threshold(480)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        box.set_margin_top(18)
+        box.set_margin_bottom(18)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+        clamp.set_child(box)
+        scroller.set_child(clamp)
+        toolbar.set_content(scroller)
+        self.set_child(toolbar)
+
+        hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        hero.set_halign(Gtk.Align.CENTER)
+        hero.append(_welcome_icon())
+        title = Gtk.Label(label="Welcome to PdaNet Linux")
+        title.set_wrap(True)
+        title.set_justify(Gtk.Justification.CENTER)
+        title.add_css_class("title-1")
+        hero.append(title)
+        subtitle = Gtk.Label(
+            label="Share your phone's mobile data over USB, Wi-Fi or "
+            "Bluetooth. Choose a few defaults now; everything can be changed "
+            "later in Settings.",
+            wrap=True,
+            justify=Gtk.Justification.CENTER,
+            max_width_chars=54,
+        )
+        subtitle.add_css_class("dim-label")
+        hero.append(subtitle)
+        box.append(hero)
+
+        readiness = Adw.PreferencesGroup(
+            title="Readiness check",
+            description="Optional checks. The phone remains in charge of "
+            "PdaNet registration and licensing.",
+        )
+        phone_row = Adw.ActionRow(
+            title="PdaNet+ on the phone",
+            subtitle="Install it, keep it licensed, and enable the same USB, "
+            "Wi-Fi or Bluetooth mode you will use here.",
+        )
+        phone_row.add_prefix(Gtk.Image.new_from_icon_name("phone-symbolic"))
+        readiness.add(phone_row)
+
+        adb = shutil.which("adb")
+        adb_row = Adw.ActionRow(
+            title="USB debugging (USB mode)",
+            subtitle=(
+                f"adb found at {adb}. Approve the authorization prompt on "
+                "the phone."
+                if adb
+                else "adb was not found. Install android-tools for USB mode; "
+                "Wi-Fi and Bluetooth do not need it."
+            ),
+        )
+        adb_row.add_prefix(
+            Gtk.Image.new_from_icon_name("utilities-terminal-symbolic")
+        )
+        adb_row.add_suffix(_readiness_icon(bool(adb)))
+        readiness.add(adb_row)
+
+        helper = privileges.find_helper()
+        helper_row = Adw.ActionRow(
+            title="Root helper on this computer",
+            subtitle=(
+                f"Found at {helper}. It creates the TUN device and routes "
+                "when you connect."
+                if helper
+                else "Not installed yet. Run sudo ./tools/install.sh from "
+                "the project folder; the app opens, but it cannot create the "
+                "tunnel without the helper."
+            ),
+        )
+        helper_row.add_prefix(
+            Gtk.Image.new_from_icon_name("system-lock-screen-symbolic")
+        )
+        helper_row.add_suffix(_readiness_icon(bool(helper)))
+        readiness.add(helper_row)
+
+        defaults = Adw.PreferencesGroup(
+            title="Defaults",
+            description="These choices are saved for the next launch.",
+        )
+        self.mode_row = Adw.ComboRow(
+            title="Preferred connection",
+            subtitle="Used by the Connect button and the tray menu",
+        )
+        self.mode_row.set_model(Gtk.StringList.new(list(self._MODE_LABELS)))
+        self.mode_row.set_selected(
+            self._MODES.index(settings.mode) if settings.mode in self._MODES else 0
+        )
+        defaults.add(self.mode_row)
+
+        self.auto_row = Adw.SwitchRow(
+            title="Auto-connect on USB plug-in",
+            subtitle="Connect automatically when a new authorized phone appears",
+        )
+        self.auto_row.set_active(settings.auto_connect_usb)
+        defaults.add(self.auto_row)
+
+        self.tray_row = Adw.SwitchRow(
+            title="Keep running in the system tray",
+            subtitle="Closing the window hides it and keeps the tunnel alive",
+        )
+        self.tray_row.set_active(settings.close_to_tray)
+        defaults.add(self.tray_row)
+        box.append(defaults)
+        box.append(readiness)
+
+        box.append(
+            _hint(
+                "You can reopen this assistant from the main menu: "
+                "Welcome & Setup. A single authentication prompt is needed "
+                "when the helper creates the tunnel; see the README for the "
+                "optional passwordless install."
+            )
+        )
+
+        footer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        footer.set_halign(Gtk.Align.END)
+        footer.set_margin_top(12)
+        footer.set_margin_bottom(12)
+        footer.set_margin_start(12)
+        footer.set_margin_end(12)
+        skip = Gtk.Button(label="Skip for now")
+        skip.connect("clicked", lambda _b: self._complete(False))
+        footer.append(skip)
+        finish = Gtk.Button(label="Finish setup")
+        finish.add_css_class("suggested-action")
+        finish.connect("clicked", lambda _b: self._complete(True))
+        footer.append(finish)
+        toolbar.add_bottom_bar(footer)
+
+    def _selected_mode(self) -> str:
+        index = self.mode_row.get_selected()
+        if 0 <= index < len(self._MODES):
+            return self._MODES[index]
+        return "usb"
+
+    def _complete(self, apply_changes: bool) -> None:
+        if self._saved:
+            return
+        self._saved = True
+        if apply_changes:
+            updated = replace(
+                self._settings,
+                mode=self._selected_mode(),
+                auto_connect_usb=self.auto_row.get_active(),
+                close_to_tray=self.tray_row.get_active(),
+                setup_complete=True,
+            ).validated()
+        else:
+            updated = replace(
+                self._settings, setup_complete=True
+            ).validated()
+        self._on_save(updated)
+        self.close()
+
+    def _on_closed(self, _dialog: Adw.Dialog) -> None:
+        if not self._saved:
+            self._saved = True
+            self._on_save(
+                replace(self._settings, setup_complete=True).validated()
+            )
 
 
 class SettingsDialog(Adw.PreferencesDialog):
@@ -218,6 +445,7 @@ class SettingsDialog(Adw.PreferencesDialog):
             privilege=current.privilege,
             wifi_share_ssid=self.share_ssid_row.get_text().strip(),
             wifi_share_interface=self.share_iface_row.get_text().strip(),
+            setup_complete=current.setup_complete,
         ).validated()
         self._on_save(updated)
 

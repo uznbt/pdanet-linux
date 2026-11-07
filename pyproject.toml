@@ -13,7 +13,6 @@ authors = [{name = "Unofficial community client"}]
 keywords = ["pdanet", "tethering", "usb", "wifi", "bluetooth", "vpn", "tun", "hotspot"]
 classifiers = [
   "Environment :: X11 Applications :: GTK",
-  "Environment :: Wayland",
   "Intended Audience :: End Users/Desktop",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",

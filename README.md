@@ -4,6 +4,7 @@
 
 # PdaNet Linux
 
+[![Build and Release](https://github.com/uznbt/pdanet-linux/actions/workflows/build.yml/badge.svg)](https://github.com/uznbt/pdanet-linux/actions/workflows/build.yml)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 [![GTK4 + libadwaita](https://img.shields.io/badge/UI-GTK4%20%2B%20libadwaita-4a86cf.svg)](https://www.gtk.org)
@@ -405,6 +406,13 @@ pdanet-linux gui
 
 or launch **PdaNet Linux** from the application menu.
 
+On first launch, a **Welcome & Setup** assistant explains the phone-side
+requirements, checks whether `adb` and the root helper are available, and
+lets you choose the default transport, USB auto-connect and close-to-tray
+behaviour. You can skip it and reopen it later from **Welcome & Setup...** in
+the header menu. The assistant never blocks the app and does not replace the
+phone's PdaNet registration.
+
 1. Choose **USB (ADB)**, **Wi-Fi** or **Bluetooth**.
 2. For USB, connect the phone, unlock it and approve the USB debugging
    prompt. Press the refresh button if the device list is empty.
@@ -438,6 +446,7 @@ The header menu contains the same actions as the PdaNet Desktop tray menu:
 - **Settings** controls auto-connect, notifications, the diagnostic log,
   close-to-tray behaviour, throttling, Microsoft blocking and the default
   WiFi Share SSID.
+- **Welcome & Setup...** reopens the first-launch assistant.
 - **Bluetooth Pairing...** scans, pairs and trusts a phone.
 - **WiFi Pairing...** scans and joins a Wi-Fi network through NetworkManager,
   then stores its gateway as the phone IP.
@@ -712,7 +721,7 @@ ip addr show pdanet0
 
 The following checks pass in this environment:
 
-- **190 unit tests** covering golden protocol bytes, framing, session
+- **193 unit tests** covering golden protocol bytes, framing, session
   handshake, TUN pump, rate limiting, routing command construction, IPv6
   leak-guard rules, ADB/Wi-Fi/Bluetooth transports, Bluetooth
   device parsing/scanning/pairing, SDP encoding and response parsing, RFCOMM
@@ -815,6 +824,22 @@ gtk4-broadwayd :13 &
 GDK_BACKEND=broadway BROADWAY_DISPLAY=:13 pdanet-linux gui
 ```
 
+### CI and releases
+
+`.github/workflows/build.yml` runs the test suite on every push to `main`,
+pull request and manual dispatch. The tests use the distribution Python with
+`python3-gi`, GTK 4 and libadwaita, so the tray protocol is exercised with the
+same typelibs as a normal installation.
+
+Pushing a tag such as `v0.1.0` also builds the sdist, wheel and a `git
+archive` source tarball. The workflow publishes all assets plus `SHA256SUMS`
+to the GitHub Release:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ### Project layout
 
 | Path | Purpose |
@@ -834,10 +859,11 @@ GDK_BACKEND=broadway BROADWAY_DISPLAY=:13 pdanet-linux gui
 | `pdanet_linux/selftest.py` | Internet Test checks |
 | `pdanet_linux/wifi.py` | NetworkManager scan/join and WiFi Share wrappers |
 | `pdanet_linux/cellular.py` | ADB telephony dump parser and signal reader |
-| `pdanet_linux/dialogs.py` | Settings, pairing, WiFi Share, Reverse PdaNet, Internet Test and Help dialogs |
+| `pdanet_linux/dialogs.py` | Welcome/setup, Settings, pairing, WiFi Share, Reverse PdaNet, Internet Test and Help dialogs |
 | `pdanet_linux/cli.py` | Command-line interface |
 | `pdanet_linux/gui.py` | GTK4/libadwaita application |
 | `pdanet_linux/mock_server.py` | Offline protocol simulator |
+| `.github/workflows/build.yml` | CI tests and tagged release assets |
 | `tools/install.sh` | System installer, polkit action and desktop entry |
 
 ---

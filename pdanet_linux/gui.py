@@ -103,6 +103,7 @@ class PdaNetWindow(Adw.ApplicationWindow):
         self._autoconnect_primed = False
         self._share_started = False
         self._target_bt: str | None = None
+        self._setup_dialog: dialogs.SetupDialog | None = None
         self._signal: cellular.CellularSignal | None = None
         self._signal_busy = False
         self._signal_error = False
@@ -503,6 +504,7 @@ class PdaNetWindow(Adw.ApplicationWindow):
         add("reverse-tether", lambda *_: self._show_reverse_tether())
         add("windows-hotspot", lambda *_: self._show_windows_hotspot())
         add("settings", lambda *_: self._show_settings())
+        add("setup", lambda *_: self._show_setup())
         add("bt-pairing", lambda *_: self._show_bt_pairing())
         add("wifi-pairing", lambda *_: self._show_wifi_pairing())
         add("internet-test", lambda *_: self._show_internet_test())
@@ -549,6 +551,7 @@ class PdaNetWindow(Adw.ApplicationWindow):
         tools.append("WiFi Share (Beta)...", "win.wifi-share")
         tools.append("Reverse PdaNet (phone uses laptop)...", "win.reverse-tether")
         tools.append("Settings", "win.settings")
+        tools.append("Welcome & Setup...", "win.setup")
         tools.append("Bluetooth Pairing...", "win.bt-pairing")
         tools.append("WiFi Pairing...", "win.wifi-pairing")
         tools.append("Windows Hotspot Settings...", "win.windows-hotspot")
@@ -591,9 +594,12 @@ class PdaNetWindow(Adw.ApplicationWindow):
         except OSError as exc:
             self._append_log(f"could not save settings: {exc}")
 
-    def _settings_saved(self, updated: config.Settings) -> None:
+    def _settings_saved(
+        self, updated: config.Settings, message: str = "Settings saved"
+    ) -> None:
         self.settings = updated
         self._save_settings()
+        self._apply_settings()
         self.autoconnect.set_enabled(updated.auto_connect_usb)
         self.auto_action.set_state(GLib.Variant.new_boolean(updated.auto_connect_usb))
         self.block_action.set_state(
@@ -605,7 +611,7 @@ class PdaNetWindow(Adw.ApplicationWindow):
         if self.conn is not None:
             self.conn.set_throttle(updated.throttle_kbps)
         self._sync_tray()
-        self._toast("Settings saved")
+        self._toast(message)
 
     def _on_auto_connect_toggled(
         self, action: Gio.SimpleAction, value: GLib.Variant
@@ -693,6 +699,21 @@ class PdaNetWindow(Adw.ApplicationWindow):
 
     def _show_settings(self) -> None:
         dialogs.SettingsDialog(self.settings, self._settings_saved).present(self)
+
+    def _show_setup(self) -> None:
+        if self._setup_dialog is not None:
+            self._setup_dialog.present(self)
+            return
+        dialog = dialogs.SetupDialog(self.settings, self._setup_saved)
+        self._setup_dialog = dialog
+        dialog.connect("closed", self._setup_closed)
+        dialog.present(self)
+
+    def _setup_saved(self, updated: config.Settings) -> None:
+        self._settings_saved(updated, "Welcome setup complete")
+
+    def _setup_closed(self, _dialog: Adw.Dialog) -> None:
+        self._setup_dialog = None
 
     def _show_bt_pairing(self) -> None:
         dialogs.BluetoothPairingDialog(self._bt_paired).present(self)
@@ -1501,6 +1522,8 @@ class PdaNetApp(Adw.Application):
             self.window = PdaNetWindow(self)
             self._create_tray()
         self._show_window()
+        if self.window is not None and not self.window.settings.setup_complete:
+            self.window._show_setup()
 
     def _show_window(self) -> None:
         if self.window is None:

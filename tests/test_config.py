@@ -23,6 +23,7 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(settings.auto_connect_usb)
         self.assertTrue(settings.close_to_tray)
         self.assertEqual(settings.wifi_port, 8740)
+        self.assertFalse(settings.setup_complete)
 
     def test_round_trip_and_permissions(self):
         settings = config.Settings(
@@ -46,6 +47,20 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(config.load(self.path).close_to_tray)
         config.save(config.Settings(close_to_tray=True), self.path)
         self.assertTrue(config.load(self.path).close_to_tray)
+
+    def test_setup_complete_round_trip(self):
+        config.save(config.Settings(setup_complete=True), self.path)
+        self.assertTrue(config.load(self.path).setup_complete)
+
+    def test_legacy_config_gets_setup_prompt(self):
+        self.path.write_text(json.dumps({"auto_connect_usb": True}))
+        loaded = config.load(self.path)
+        self.assertTrue(loaded.auto_connect_usb)
+        self.assertFalse(loaded.setup_complete)
+
+    def test_invalid_setup_flag_falls_back(self):
+        self.path.write_text(json.dumps({"setup_complete": "yes"}))
+        self.assertFalse(config.load(self.path).setup_complete)
 
     def test_corrupt_file_falls_back(self):
         self.path.write_text("{not json")

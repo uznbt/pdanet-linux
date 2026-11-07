@@ -64,6 +64,7 @@ class Settings:
     privilege: str = "auto"
     wifi_share_ssid: str = "PdaNet Share"
     wifi_share_interface: str = ""
+    setup_complete: bool = False
 
     def validated(self) -> "Settings":
         """Return a copy with out-of-range values replaced by defaults."""
@@ -73,6 +74,8 @@ class Settings:
             data["mode"] = defaults.mode
         if data["privilege"] not in VALID_PRIVILEGES:
             data["privilege"] = defaults.privilege
+        if not isinstance(data.get("setup_complete"), bool):
+            data["setup_complete"] = defaults.setup_complete
         try:
             data["throttle_kbps"] = int(data["throttle_kbps"])
         except (TypeError, ValueError):
