@@ -694,6 +694,14 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     print(f"helper: {info['helper'] or 'NOT INSTALLED'}")
     print(f"pkexec: {info['pkexec'] or 'missing'}")
     print(f"sudo: {info['sudo'] or 'missing'}")
+    print(
+        "sudo passwordless: "
+        + (
+            "yes"
+            if info["passwordless"]
+            else "no (install with --passwordless to avoid prompts)"
+        )
+    )
     print(f"polkit helper lock: {os.path.exists(netconfig.LOCK_PATH)}")
     try:
         proc = netconfig.run_ip("rule", "show", check=False)
@@ -801,7 +809,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="block Microsoft update/telemetry names in "
                             "/etc/hosts while connected")
     p_con.add_argument("--privilege", choices=["auto", "pkexec", "sudo", "root"],
-                       default="auto", help="how to obtain CAP_NET_ADMIN")
+                       default="auto",
+                       help="how to obtain CAP_NET_ADMIN (auto prefers the "
+                            "passwordless helper when installed)")
     p_con.add_argument("--dry-run", action="store_true",
                        help="only connect/handshake, do not create a TUN device")
     p_con.add_argument("-v", "--verbose", action="store_true",
@@ -890,7 +900,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve_start.add_argument("--privilege",
                                choices=["auto", "pkexec", "sudo", "root"],
                                default="auto",
-                               help="how to obtain CAP_NET_ADMIN")
+                               help="how to obtain CAP_NET_ADMIN (auto "
+                                    "prefers the passwordless helper when "
+                                    "installed)")
     p_serve_start.add_argument("-v", "--verbose", action="store_true",
                                help="log every IP packet (slow)")
     p_serve_start.set_defaults(func=cmd_serve)

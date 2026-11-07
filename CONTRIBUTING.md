@@ -37,6 +37,7 @@ python3 -m venv .venv
 python3 -m pip install -e .
 
 # Optional: install the root helper and desktop integration
+# Add --passwordless to install the helper-only NOPASSWD sudoers rule.
 sudo ./tools/install.sh
 ```
 

@@ -288,7 +288,8 @@ quirks:
 - Linux with TUN support (`/dev/net/tun`) and `iproute2`
 - Python 3.10 or newer
 - `adb` from the Android platform tools
-- `polkit`/`pkexec` (recommended) or `sudo`
+- `polkit`/`pkexec` or `sudo`; `sudo ./tools/install.sh --passwordless`
+  avoids per-connection prompts (see [No password prompts](#no-password-prompts-for-daily-use))
 - For the GUI: PyGObject, GTK 4 and libadwaita
 - For Bluetooth: BlueZ (`bluetoothctl`), a running `bluetooth` service and
   kernel RFCOMM support
@@ -348,7 +349,34 @@ group/world write access. Do not replace that directory with a user-owned
 copy (`cp -r pdanet_linux ...`); always reinstall with `sudo
 ./tools/install.sh`.
 
-Remove it with:
+### No password prompts for daily use
+
+By default the GUI starts the helper through pkexec and the CLI through
+sudo, so the desktop asks for authentication when a tunnel starts. For a
+one-time install that avoids those prompts:
+
+```bash
+sudo ./tools/install.sh --passwordless
+```
+
+The installer validates and writes `/etc/sudoers.d/pdanet-linux`:
+
+```sudoers
+youruser ALL=(root) NOPASSWD: /usr/local/libexec/pdanet-linux-helper
+```
+
+The rule is limited to the installed PdaNet helper; it does not grant
+general sudo. The default `auto` privilege mode then starts the helper with
+`sudo -n` and no prompt. `pdanet-linux doctor` reports
+`sudo passwordless: yes` when the rule is active.
+
+A later `sudo ./tools/install.sh` upgrade leaves the rule in place, and
+`tools/uninstall.sh` removes it. The rule lets your user create and
+configure TUN interfaces, policy routes, DNS settings and the reverse-mode
+firewall/NAT chains without a password. That is a privileged networking
+capability, so only enable it on a machine you trust.
+
+Remove the client and the passwordless rule with:
 
 ```bash
 sudo ./tools/uninstall.sh
@@ -532,7 +560,7 @@ Useful options:
 | `--usb-flag N` | init transport flag for USB (default `256`) |
 | `--wifi-flag N` | init transport flag for Wi-Fi (default `64`) |
 | `--bt-flag N` | init transport flag for Bluetooth (default `4`) |
-| `--privilege MODE` | `auto`, `pkexec`, `sudo`, or `root` |
+| `--privilege MODE` | `auto` (prefers the passwordless helper), `pkexec`, `sudo`, or `root` |
 | `--local-port N` | local port for `adb forward` (default: choose a free port) |
 | `-v` | log forwarded IP packets and server messages |
 | `--dry-run` | connect and handshake only |
@@ -608,7 +636,7 @@ Useful `serve start` options:
 | `--name NAME` | server name shown by PdaNet (default: hostname) |
 | `--allow CIDR` | extra client subnet allowed to connect (repeatable) |
 | `--no-nat` | do not add MASQUERADE rules |
-| `--privilege MODE` | `auto`, `pkexec`, `sudo`, or `root` |
+| `--privilege MODE` | `auto` (prefers the passwordless helper), `pkexec`, `sudo`, or `root` |
 
 **Single-radio limitation.** A laptop with one Wi-Fi adapter cannot be an
 access point and a client of the same phone hotspot at the same time. For
@@ -684,18 +712,18 @@ ip addr show pdanet0
 
 The following checks pass in this environment:
 
-- **181 unit tests** covering golden protocol bytes, framing, session
+- **190 unit tests** covering golden protocol bytes, framing, session
   handshake, TUN pump, rate limiting, routing command construction, IPv6
   leak-guard rules, ADB/Wi-Fi/Bluetooth transports, Bluetooth
   device parsing/scanning/pairing, SDP encoding and response parsing, RFCOMM
   channel selection, discovery parsing, privilege separation and FD passing,
-  the helper control protocol, the mock server, settings
-  persistence/validation, auto-connect state, Internet Test checks,
-  `/etc/hosts` Microsoft blocking, the NetworkManager WiFi
-  scan/connect/share wrappers, the cellular telephony parser, the
-  StatusNotifierItem/DBusMenu tray model, and the reverse PdaNet server's
-  discovery reply, framing, source filtering, relay, shutdown, forwarding
-  and NAT rule lifecycle.
+  passwordless-sudo detection and launcher selection, the helper control
+  protocol, the mock server, settings persistence/validation, auto-connect
+  state, Internet Test checks, `/etc/hosts` Microsoft blocking, the
+  NetworkManager WiFi scan/connect/share wrappers, the cellular telephony
+  parser, the StatusNotifierItem/DBusMenu tray model, and the reverse PdaNet
+  server's discovery reply, framing, source filtering, relay, shutdown,
+  forwarding and NAT rule lifecycle.
 - **Routing lifecycle test in a user network namespace**: three complete
   TUN up/down cycles, starting with stale current and legacy policy rules,
   leave no rules or interfaces behind. A live full-route test with a normal
@@ -727,6 +755,10 @@ The following checks pass in this environment:
   checkboxes and all six dialogs were instantiated headlessly.
 - **`pdanet-linux doctor`** reports the local ADB, TUN, routing, polkit,
   GTK and Bluetooth status.
+- **Passwordless install staging**: a `DESTDIR` install with
+  `--passwordless` produced a `visudo`-valid `0440` sudoers rule for the
+  helper, and `uninstall.sh` removed it again. Activating the rule on the
+  live system needs the user's sudo password and is listed below.
 
 Still required for a complete validation:
 
@@ -751,6 +783,9 @@ Still required for a complete validation:
    `PDANET_SRV` chains, restores `ip_forward` and deletes the TUN. A
    reverse-server live session has not yet been possible on this machine
    because `wlan0` is soft-blocked.
+7. Run `sudo ./tools/install.sh --passwordless`, confirm
+   `pdanet-linux doctor` reports `sudo passwordless: yes`, then disconnect
+   and reconnect to verify that no authentication prompt appears.
 
 The USB transport flag `256` is confirmed both statically from the
 server-side mapping in `com.pdanet.d.run` (256 → transport id 1) and from
@@ -857,6 +892,21 @@ GDK_BACKEND=broadway BROADWAY_DISPLAY=:13 pdanet-linux gui
 **`the privileged helper is not installed`**
 : Run `sudo ./tools/install.sh`, or start the client as root for a quick
   test. The helper is needed only for TUN creation, routes and DNS.
+
+**The app still asks for a password**
+: Check `pdanet-linux doctor`; it reports `sudo passwordless: yes` when the
+  one-time rule is active. If it says `no`, reinstall with
+  `sudo ./tools/install.sh --passwordless`. You can also inspect the
+  matching rule directly:
+
+  ```bash
+  sudo -n -ll /usr/local/libexec/pdanet-linux-helper
+  ```
+
+  A NOPASSWD rule contains `!authenticate`. If the rule is present but the
+  prompt remains, make sure the app uses the default `auto` privilege mode;
+  an explicit `sudo` or `pkexec` choice always asks for authentication.
+  The reverse server and GUI use the same `auto` mode.
 
 **`another PdaNet tunnel is already active`**
 : Another instance holds `/run/pdanet-linux.lock`. Close it, or remove stale
@@ -975,7 +1025,9 @@ GDK_BACKEND=broadway BROADWAY_DISPLAY=:13 pdanet-linux gui
   never invokes a shell, and only creates/configures/removes the TUN
   interface, routes and DNS. In reverse mode it additionally toggles IPv4
   forwarding and installs/removes dedicated `PDANET_SRV` iptables chains;
-  it never edits the user's existing firewall chains.
+  it never edits the user's existing firewall chains. Its wrapper starts
+  Python with `-I` (isolated mode), so `PYTHONPATH`, `PYTHONHOME` and the
+  user site directory cannot alter imports in the root process.
 - The reverse server accepts clients only from the hotspot subnet and the
   fixed phone address `10.1.19.2`, rejects all other source addresses, and
   limits return traffic to established flows.
@@ -987,6 +1039,11 @@ GDK_BACKEND=broadway BROADWAY_DISPLAY=:13 pdanet-linux gui
   closes.
 - The polkit action is restricted to authentication as an administrator.
   Review `data/io.github.pdanet.PdaNetLinux.policy.in` before installing.
+- `tools/install.sh --passwordless` writes one sudoers rule for the helper
+  path only; it does not grant general sudo. The user can then create TUN
+  interfaces, change routes and DNS, and manage the reverse-mode firewall
+  chains without a password. Treat that as privileged networking access and
+  remove `/etc/sudoers.d/pdanet-linux` (or run the uninstaller) to revoke it.
 
 ---
 

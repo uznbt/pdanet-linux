@@ -2,6 +2,7 @@ import array
 import json
 import os
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -200,9 +201,124 @@ class HelperCandidatesTests(unittest.TestCase):
             self.assertNotIn("/does/not/exist", privileges.helper_candidates())
 
     def test_status_shape(self):
-        info = privileges.status()
-        for key in ("euid", "helper", "pkexec", "sudo", "tun", "tun_access"):
+        with mock.patch.object(
+            privileges, "find_helper", return_value="/usr/bin/true"
+        ), mock.patch.object(
+            privileges, "_sudo_passwordless", return_value=True
+        ):
+            info = privileges.status()
+        for key in (
+            "euid",
+            "helper",
+            "pkexec",
+            "sudo",
+            "passwordless",
+            "tun",
+            "tun_access",
+        ):
             self.assertIn(key, info)
+        self.assertTrue(info["passwordless"])
+
+
+class LauncherTests(unittest.TestCase):
+    def test_sudo_passwordless_detects_nopasswd(self):
+        completed = subprocess.CompletedProcess(
+            ["sudo"], 0, stdout="Options: !authenticate\n", stderr=""
+        )
+        with mock.patch.object(
+            privileges.shutil, "which", return_value="/usr/bin/sudo"
+        ), mock.patch.object(
+            privileges.subprocess, "run", return_value=completed
+        ) as run:
+            self.assertTrue(privileges._sudo_passwordless("/x/helper"))
+        args, kwargs = run.call_args
+        self.assertEqual(
+            args[0], ["/usr/bin/sudo", "-n", "-ll", "/x/helper"]
+        )
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertTrue(kwargs["text"])
+        self.assertFalse(kwargs["check"])
+
+    def test_sudo_passwordless_rejects_rule_that_needs_a_password(self):
+        completed = subprocess.CompletedProcess(
+            ["sudo"], 0, stdout="(ALL) ALL\n", stderr=""
+        )
+        with mock.patch.object(
+            privileges.shutil, "which", return_value="/usr/bin/sudo"
+        ), mock.patch.object(
+            privileges.subprocess, "run", return_value=completed
+        ):
+            self.assertFalse(privileges._sudo_passwordless("/x/helper"))
+
+    def test_sudo_passwordless_handles_failure(self):
+        completed = subprocess.CompletedProcess(
+            ["sudo"], 1, stdout="", stderr="password is required"
+        )
+        with mock.patch.object(
+            privileges.shutil, "which", return_value="/usr/bin/sudo"
+        ), mock.patch.object(
+            privileges.subprocess, "run", return_value=completed
+        ):
+            self.assertFalse(privileges._sudo_passwordless("/x/helper"))
+
+    def test_sudo_passwordless_without_sudo(self):
+        with mock.patch.object(privileges.shutil, "which", return_value=None):
+            self.assertFalse(privileges._sudo_passwordless("/x/helper"))
+
+    def test_sudo_passwordless_handles_timeout(self):
+        with mock.patch.object(
+            privileges.shutil, "which", return_value="/usr/bin/sudo"
+        ), mock.patch.object(
+            privileges.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["sudo"], 10),
+        ):
+            self.assertFalse(privileges._sudo_passwordless("/x/helper"))
+
+    @staticmethod
+    def _which(name):
+        return {
+            "sudo": "/usr/bin/sudo",
+            "pkexec": "/usr/bin/pkexec",
+        }.get(name)
+
+    def test_auto_prefers_passwordless_helper(self):
+        with mock.patch.object(
+            privileges, "_sudo_passwordless", return_value=True
+        ), mock.patch.object(
+            privileges.shutil, "which", side_effect=self._which
+        ), mock.patch.dict(
+            os.environ, {"DISPLAY": ":0"}, clear=False
+        ):
+            argv, capture = privileges._choose_launcher("auto", "/x/helper")
+        self.assertEqual(argv, ["/usr/bin/sudo", "-n"])
+        self.assertFalse(capture)
+
+    def test_auto_uses_pkexec_in_a_gui_without_passwordless(self):
+        with mock.patch.object(
+            privileges, "_sudo_passwordless", return_value=False
+        ), mock.patch.object(
+            privileges.shutil, "which", side_effect=self._which
+        ), mock.patch.dict(
+            os.environ, {"DISPLAY": ":0"}, clear=False
+        ):
+            argv, capture = privileges._choose_launcher("auto", "/x/helper")
+        self.assertEqual(argv, ["/usr/bin/pkexec"])
+        self.assertTrue(capture)
+
+    def test_explicit_passwordless_uses_non_interactive_sudo(self):
+        with mock.patch.object(
+            privileges.shutil, "which", side_effect=self._which
+        ):
+            argv, capture = privileges._choose_launcher("passwordless")
+        self.assertEqual(argv, ["/usr/bin/sudo", "-n"])
+        self.assertFalse(capture)
+
+    def test_root_launcher_has_no_prefix(self):
+        with mock.patch.object(privileges.os, "geteuid", return_value=0):
+            argv, capture = privileges._choose_launcher("root")
+        self.assertEqual(argv, [])
+        self.assertFalse(capture)
 
 
 if __name__ == "__main__":

@@ -285,7 +285,7 @@ class PdaNetWindow(Adw.ApplicationWindow):
 
         self.privilege_row = Adw.ComboRow(title="Privilege method")
         self.privilege_row.set_model(
-            Gtk.StringList.new(["Auto (pkexec)", "sudo", "pkexec"])
+            Gtk.StringList.new(["Auto (recommended)", "sudo", "pkexec"])
         )
         self.privilege_row.set_selected(0)
         tunnel_group.add(self.privilege_row)

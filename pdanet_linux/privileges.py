@@ -119,10 +119,44 @@ class HelperTun:
             self.fd = -1
 
 
-def _choose_launcher(privilege: str) -> tuple[str, bool]:
-    """Return (launcher, capture_stderr)."""
+def _sudo_passwordless(helper: str) -> bool:
+    """Return True when sudo may run *helper* without a password.
+
+    ``sudo -n -ll <command>`` prints the matching sudoers entry.  A
+    NOPASSWD rule is shown as the ``!authenticate`` option.  Looking at the
+    rule instead of simply running the helper avoids a false positive from
+    an earlier interactive sudo command that is still inside its timestamp
+    window.
+    """
+    sudo = shutil.which("sudo")
+    if not sudo:
+        return False
+    try:
+        proc = subprocess.run(
+            [sudo, "-n", "-ll", helper],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if proc.returncode != 0:
+        return False
+    output = proc.stdout or ""
+    return "!authenticate" in output or "NOPASSWD" in output
+
+
+def _choose_launcher(
+    privilege: str, helper: str | None = None
+) -> tuple[list[str], bool]:
+    """Return (argv prefix, capture_stderr) for the privileged helper."""
     if privilege == "auto":
-        if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"):
+        if helper and _sudo_passwordless(helper):
+            privilege = "passwordless"
+        elif os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"):
             privilege = "pkexec"
         elif sys.stdin.isatty():
             privilege = "sudo"
@@ -132,18 +166,25 @@ def _choose_launcher(privilege: str) -> tuple[str, bool]:
         exe = shutil.which("pkexec")
         if not exe:
             raise PrivilegeError("pkexec was not found; install polkit or run as root")
-        return exe, True
+        return [exe], True
     if privilege == "sudo":
         exe = shutil.which("sudo")
         if not exe:
             raise PrivilegeError("sudo was not found; install sudo or run as root")
-        return exe, False
+        return [exe], False
+    if privilege == "passwordless":
+        exe = shutil.which("sudo")
+        if not exe:
+            raise PrivilegeError(
+                "sudo was not found; install sudo or use --privilege pkexec"
+            )
+        return [exe, "-n"], False
     if privilege == "root":
         if os.geteuid() != 0:
             raise PrivilegeError(
                 "--privilege root requires starting the client as root"
             )
-        return "", False
+        return [], False
     raise PrivilegeError(f"unknown privilege mode {privilege!r}")
 
 
@@ -184,7 +225,7 @@ def open_tun(
             "from the pdanet-linux directory, or start the client as root."
         )
 
-    launcher, capture = _choose_launcher(privilege)
+    launcher, capture = _choose_launcher(privilege, helper)
     token = secrets.token_hex(32)
     runtime = _runtime_dir()
     socket_path = os.path.join(runtime, f"helper-{os.getpid()}-{secrets.token_hex(4)}.sock")
@@ -197,7 +238,7 @@ def open_tun(
     server.listen(1)
     server.settimeout(0.5)
 
-    cmd = [launcher, helper, "--socket", socket_path, "--token", token]
+    cmd = [*launcher, helper, "--socket", socket_path, "--token", token]
     kwargs: dict = {}
     if capture:
         kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
@@ -266,7 +307,13 @@ def open_tun(
         fd = _recv_fd(conn)
         info = json.loads(reply[3:].decode())
         name = str(info.get("ifname") or config.name)
-        log(f"TUN {name} configured via {os.path.basename(launcher)} helper")
+        if launcher[1:] == ["-n"]:
+            launcher_name = "passwordless sudo"
+        elif launcher:
+            launcher_name = os.path.basename(launcher[0])
+        else:
+            launcher_name = "root"
+        log(f"TUN {name} configured via {launcher_name} helper")
         return HelperTun(fd=fd, name=name, conn=conn, proc=proc)
     except Exception:
         if conn is not None:
@@ -300,11 +347,13 @@ def _unlink(path: str) -> None:
 
 
 def status() -> dict[str, object]:
+    helper = find_helper()
     return {
         "euid": os.geteuid(),
-        "helper": find_helper(),
+        "helper": helper,
         "pkexec": shutil.which("pkexec"),
         "sudo": shutil.which("sudo"),
+        "passwordless": bool(helper) and _sudo_passwordless(helper),
         "tun": os.path.exists("/dev/net/tun"),
         "tun_access": os.access("/dev/net/tun", os.R_OK | os.W_OK),
     }

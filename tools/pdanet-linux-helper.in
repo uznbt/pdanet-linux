@@ -1,5 +1,8 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 -I
 # Root-owned wrapper installed by tools/install.sh.
+# -I ignores PYTHON* environment variables and the user site directory, so a
+# passwordless sudo rule cannot be turned into code execution through
+# PYTHONPATH/PYTHONHOME.
 import sys
 
 sys.path.insert(0, "@LIBDIR@")
