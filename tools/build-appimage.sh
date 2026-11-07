@@ -41,6 +41,7 @@ pyinstaller() {
     "$PYTHON" -m PyInstaller \
         --noconfirm --clean --onedir \
         --paths "$ROOT" \
+        --additional-hooks-dir "$ROOT/packaging/appimage/hooks" \
         --distpath "$BUILD/pyinstaller-dist" \
         --workpath "$BUILD/pyinstaller-work" \
         --specpath "$BUILD/spec" \
@@ -60,6 +61,13 @@ pyinstaller --name pdanet-linux-helper packaging/appimage/helper_entry.py
 # some distributions.  Keep the schemas and the two icon themes that GTK and
 # libadwaita actually need; the host remains the fallback for everything else.
 APP_PAYLOAD="$BUILD/pyinstaller-dist/pdanet-linux"
+for typelib in Gtk-4.0 Gdk-4.0 Gsk-4.0 Pango-1.0 Adw-1; do
+    if [ ! -f "$APP_PAYLOAD/_internal/gi_typelibs/$typelib.typelib" ]; then
+        echo "error: PyInstaller did not bundle $typelib.typelib" >&2
+        echo "       check packaging/appimage/hooks and the GI environment" >&2
+        exit 1
+    fi
+done
 for unwanted in icons locale themes mime fontconfig; do
     rm -rf "$APP_PAYLOAD/_internal/share/$unwanted"
 done
