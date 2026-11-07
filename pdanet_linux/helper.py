@@ -58,6 +58,8 @@ def _config_from_json(raw: dict) -> netconfig.TunConfig:
         dns=tuple(str(item) for item in raw.get("dns", netconfig.DEFAULT_DNS)),
         bypass=bypass,
         block_microsoft=bool(raw.get("block_microsoft", False)),
+        role=str(raw.get("role", netconfig.ROLE_CLIENT)),
+        server_nat=bool(raw.get("server_nat", True)),
     ).validate()
 
 
@@ -89,6 +91,7 @@ def serve(socket_path: str, token: str) -> int:
                 "address": config.address,
                 "mtu": config.mtu,
                 "route_all": config.route_all,
+                "role": config.role,
             },
         )
         # Send exactly one byte plus the fd.  The parent uses recvmsg().

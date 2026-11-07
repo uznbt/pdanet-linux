@@ -9,7 +9,9 @@
 [![GTK4 + libadwaita](https://img.shields.io/badge/UI-GTK4%20%2B%20libadwaita-4a86cf.svg)](https://www.gtk.org)
 
 An unofficial Linux client for **PdaNet+** USB, Wi-Fi and Bluetooth tethering,
-with a GTK4/libadwaita GUI and a command-line interface.
+with a GTK4/libadwaita GUI and a command-line interface. It can also run in
+reverse: a phone joins a laptop hotspot and uses PdaNet's client mode to
+reach the Internet through the laptop.
 
 The client exposes a Linux TUN interface and relays raw IPv4 packets to the
 PdaNet server running on an Android phone. TCP and UDP are handled by the
@@ -19,15 +21,17 @@ phone's user-space network stack; the phone does not proxy ICMP.
 > with a Redmi Note 9 Pro: init/model handshake, DNS, TCP and UDP all work
 > through the tunnel. Wi-Fi and Bluetooth still need live validation; the
 > Bluetooth link also needs a fresh pairing because the phone currently
-> holds a one-sided bond. See [Verification](#verification) before relying
-> on it.
+> holds a one-sided bond. The reverse PdaNet server is implemented and unit
+> tested, but its live session is also pending because this machine's Wi-Fi
+> radio is currently soft-blocked. See [Verification](#verification) before
+> relying on it.
 >
 > The PdaNet Desktop feature set is implemented in the GUI and CLI: tray-menu
 > actions, a StatusNotifierItem tray icon with close-to-background behaviour,
-> settings, WiFi Share, pairing dialogs, auto-connect, throttling,
-> Microsoft blocking, Internet Test, help and logging. The dashboard and tray
-> can also show the phone's cellular operator, radio technology, signal bars
-> and RSRP when ADB telemetry is available. See the
+> settings, WiFi Share, Reverse PdaNet, pairing dialogs, auto-connect,
+> throttling, Microsoft blocking, Internet Test, help and logging. The
+> dashboard and tray can also show the phone's cellular operator, radio
+> technology, signal bars and RSRP when ADB telemetry is available. See the
 > [feature map](#pdanet-desktop-feature-map).
 
 This project is not affiliated with PdaNet/FoxFi. It does not bypass
@@ -100,13 +104,22 @@ uptime and the phone signal appear after a transport is connected.
 - **Block Microsoft Connections** — managed `/etc/hosts` section, installed
   and removed by the root helper around the tunnel.
 - **WiFi Share (Beta)** — NetworkManager AP with shared IPv4 (NAT and DNS)
-  to share the PdaNet tunnel with other devices.
+  to share any Internet connection on this computer (Ethernet, Wi-Fi or a
+  PdaNet tunnel) with phones and tablets. It does not require PdaNet client
+  mode on the phone.
+- **Reverse PdaNet server** — the opposite direction: the phone joins a
+  hotspot created by this computer and uses PdaNet's
+  **Connect to a PdaNet Hotspot** mode. The laptop runs the UDP discovery
+  responder (`8000`), TCP server (`8740`), TUN (`10.1.19.1/24`), IPv4
+  forwarding and NAT, so the phone reaches the Internet through the
+  laptop's normal upstream. Available from the GUI and
+  `pdanet-linux serve start|status|stop`.
 - **Internet Test** — TUN, system DNS, UDP DNS, TCP and HTTPS checks with
   copyable results, also available as `pdanet-linux test`.
 - **Optional diagnostic log** — `$XDG_STATE_HOME/pdanet-linux/pdanet.log`.
 - **CLI** — `devices`, `discover`, `signal`, `bt-devices`, `bt-scan`,
   `connect`, `test`, `wifi-scan`, `wifi-connect`, `share start|stop|status`,
-  `doctor`, and `gui`.
+  `serve start|status|stop`, `doctor`, and `gui`.
 - **Offline protocol simulator** — `pdanet_linux/mock_server.py`.
 
 ### PdaNet Desktop feature map
@@ -115,7 +128,8 @@ uptime and the phone signal appear after a transport is connected.
 |---|---|
 | Connect USB / WiFi / Bluetooth | Same transports; USB via adb, WiFi via TCP, Bluetooth via RFCOMM |
 | Disconnect | Disconnects and removes routes, DNS, hosts block and TUN |
-| WiFi Share (Beta) | NetworkManager access point with shared IPv4 (NAT + DNS) |
+| WiFi Share (Beta) | NetworkManager access point with shared IPv4 (NAT + DNS); shares any upstream |
+| Reverse PdaNet | Laptop hotspot + discovery/TCP server + TUN forwarding/NAT for the phone's PdaNet client mode |
 | Settings | Linux-relevant options in the GUI; Windows Mobile/RAS rows are marked not applicable |
 | Bluetooth Pairing | Scan/pair/trust dialog using BlueZ |
 | WiFi Pairing | `nmcli` scan/join dialog; the gateway becomes the phone IP |
@@ -248,6 +262,25 @@ ignored (the reference Android client does the same).
   pairing and link state; the data path uses Python's built-in
   `AF_BLUETOOTH`/`BTPROTO_RFCOMM` socket support, so PyBluez is not needed.
 
+### Reverse server (phone client mode)
+
+The phone's **Connect to a PdaNet Hotspot** mode is a PdaNet client. It
+finds a server by sending a 64-byte UDP datagram to the DHCP gateway on port
+`8000`, then opens TCP `8740`. The reverse server mirrors the phone server's
+quirks:
+
+- The discovery answer is 64 bytes: marker `5014` in little-endian at
+  offset 0, server IPv4 at 4, client IPv4 at 8, MAC text at 12 and the
+  server name at 32. The phone client reads the marker big-endian and
+  byte-swaps it, so the reply must be written little-endian.
+- The phone sends the same client header and handshake as the desktop
+  client: init type `15` with flag `64`, model type `302` UTF-16LE, then
+  raw IPv4 type `64`.
+- Raw IP from the laptop uses the little-endian `ServerHeader`, command
+  `64`. The phone writes the payload into its VPN TUN (`10.1.19.2/24`).
+- The server TUN is `10.1.19.1/24`; packets from the phone must have source
+  `10.1.19.2` and are otherwise dropped.
+
 ---
 
 ## Requirements
@@ -260,6 +293,8 @@ ignored (the reference Android client does the same).
 - For Bluetooth: BlueZ (`bluetoothctl`), a running `bluetooth` service and
   kernel RFCOMM support
 - For WiFi Pairing and WiFi Share: NetworkManager with `nmcli`
+- For reverse PdaNet: `iptables` (the nftables backend is fine) and
+  `/proc/sys/net/ipv4/ip_forward`, plus an AP-capable Wi-Fi adapter
 - Optional desktop notifications: `notify-send` from libnotify
 - PdaNet+ running on the phone, with USB debugging enabled for USB mode
   and Bluetooth tethering enabled for Bluetooth mode
@@ -274,15 +309,17 @@ Install examples:
 # Debian / Ubuntu
 sudo apt install python3 android-sdk-platform-tools-common adb iproute2 \
     policykit-1 python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 bluez \
-    network-manager libnotify-bin
+    network-manager libnotify-bin iptables
 
 # Fedora
 sudo dnf install python3 android-tools iproute polkit \
-    python3-gobject gtk4 libadwaita bluez NetworkManager libnotify
+    python3-gobject gtk4 libadwaita bluez NetworkManager libnotify \
+    iptables
 
 # Arch Linux
 sudo pacman -S python android-tools iproute2 polkit \
-    python-gobject gtk4 libadwaita bluez bluez-utils networkmanager libnotify
+    python-gobject gtk4 libadwaita bluez bluez-utils networkmanager \
+    libnotify iptables-nft
 ```
 
 Package names vary by distribution; `adb` is often in
@@ -366,7 +403,10 @@ The header menu contains the same actions as the PdaNet Desktop tray menu:
 - **Connect USB / Connect WiFi... / Connect Bluetooth / Disconnect** switch
   transports. Switching while connected disconnects first, then reconnects.
 - **WiFi Share (Beta)...** creates a NetworkManager access point and shares
-  the tunnel. The adapter must support AP mode.
+  this computer's current Internet connection (Ethernet, Wi-Fi or PdaNet).
+  The adapter must support AP mode.
+- **Reverse PdaNet...** creates a hotspot, TUN and PdaNet server so a phone
+  can use this computer's Internet through PdaNet's client mode.
 - **Settings** controls auto-connect, notifications, the diagnostic log,
   close-to-tray behaviour, throttling, Microsoft blocking and the default
   WiFi Share SSID.
@@ -467,6 +507,11 @@ pdanet-linux share start --ssid "PdaNet Share" --password "secret123"
 pdanet-linux share status
 pdanet-linux share stop
 
+# Reverse PdaNet: the phone uses this computer's Internet (PdaNet client mode)
+pdanet-linux serve start --ssid "Laptop Hotspot"
+pdanet-linux serve status
+pdanet-linux serve stop
+
 # Throttle and Microsoft blocking for the next connection
 pdanet-linux connect --usb --throttle 512 --block-microsoft
 ```
@@ -495,6 +540,84 @@ Useful options:
 Press `Ctrl+C` to disconnect. The helper removes the routing rules, the
 routing table entries and the TUN interface when the client exits, including
 on a crash (the helper sees the control socket close).
+
+### Reverse PdaNet (phone uses this computer's Internet)
+
+Normal PdaNet has the phone acting as the server and the computer as the
+client. **Reverse PdaNet** is the opposite direction and is compatible with
+PdaNet+'s phone-side **Connect to a PdaNet Hotspot** mode:
+
+```text
+phone Wi-Fi ──► laptop hotspot (NetworkManager) ──► PdaNet TCP 8740
+                                                   ──► laptop TUN 10.1.19.1/24
+                                                   ──► IPv4 forward + NAT
+                                                   ──► laptop uplink
+```
+
+**GUI:** open the header menu → **Reverse PdaNet...**, choose the hotspot
+name/password (or leave the password blank to generate one), then press
+**Start Reverse PdaNet**. Closing the dialog stops the server, TUN and any
+hotspot it created.
+
+**CLI:**
+
+```bash
+# Create/reuse the hotspot, TUN and server; Ctrl+C stops everything
+pdanet-linux serve start --ssid "Laptop Hotspot"
+
+# Use an existing NetworkManager hotspot named pdanet-share
+pdanet-linux serve start --no-hotspot
+
+# Keep the hotspot after Ctrl+C (the TUN and firewall rules are still removed)
+pdanet-linux serve start --keep-hotspot
+
+# Manage a server started in another terminal
+pdanet-linux serve status
+pdanet-linux serve stop
+```
+
+On the phone:
+
+1. Connect to the laptop hotspot. If `serve start` generated a password,
+   it is printed once and also shown by `serve status`.
+2. Open PdaNet+ on the phone and choose **Connect to a PdaNet Hotspot**.
+3. Approve Android's VPN request. The phone now sends its traffic through
+   the laptop.
+
+The laptop needs `net.ipv4.ip_forward=1` (enabled temporarily and restored
+on exit) and `iptables` rules in dedicated `PDANET_SRV` chains. NAT applies
+only to `10.1.19.0/24`; the FORWARD chain accepts only the phone address
+`10.1.19.2` and related return traffic. `--no-nat` is available for a
+routed setup, but then the upstream router must know a route back to
+`10.1.19.0/24`.
+
+Useful `serve start` options:
+
+| Option | Meaning |
+|---|---|
+| `--ssid NAME` | hotspot name (default `PdaNet Laptop`) |
+| `-p`, `--password TEXT` | WPA2 password; blank generates one |
+| `--interface IFACE` | Wi-Fi interface for the hotspot (default: auto) |
+| `--no-hotspot` | require and reuse the existing `pdanet-share` hotspot |
+| `--keep-hotspot` | leave the hotspot running after the server stops |
+| `--listen ADDR` | TCP listen address (default `0.0.0.0`) |
+| `--port N` | TCP port (default `8740`) |
+| `--discovery-port N` | UDP discovery port (default `8000`) |
+| `--tun NAME` | TUN interface name (default `pdanet0`) |
+| `--mtu N` | TUN MTU (default `1500`) |
+| `--name NAME` | server name shown by PdaNet (default: hostname) |
+| `--allow CIDR` | extra client subnet allowed to connect (repeatable) |
+| `--no-nat` | do not add MASQUERADE rules |
+| `--privilege MODE` | `auto`, `pkexec`, `sudo`, or `root` |
+
+**Single-radio limitation.** A laptop with one Wi-Fi adapter cannot be an
+access point and a client of the same phone hotspot at the same time. For
+reverse PdaNet the laptop is the access point and its Internet comes from
+Ethernet, another Wi-Fi adapter, or a PdaNet USB/Bluetooth link. Sharing
+the same phone's PdaNet USB link through the hotspot works, but the traffic
+then makes an unnecessary round trip through the phone. For ordinary
+sharing, **WiFi Share** already shares any upstream and needs no PdaNet
+client mode on the receiving device.
 
 ---
 
@@ -539,6 +662,12 @@ flushed before the next connection.
 used when systemd-resolved is available. Otherwise DNS is left unchanged
 and `--dns` has no effect.
 
+Reverse mode does not touch the laptop's default route or policy rules. The
+TUN only gets `10.1.19.1/24`; the kernel forwards between it and the normal
+uplink, and a dedicated NAT chain masquerades `10.1.19.0/24` behind the
+laptop's current source address. Return traffic is matched by conntrack, so
+no route back to the TUN is needed on the upstream network.
+
 Check the state with:
 
 ```bash
@@ -555,7 +684,7 @@ ip addr show pdanet0
 
 The following checks pass in this environment:
 
-- **164 unit tests** covering golden protocol bytes, framing, session
+- **181 unit tests** covering golden protocol bytes, framing, session
   handshake, TUN pump, rate limiting, routing command construction, IPv6
   leak-guard rules, ADB/Wi-Fi/Bluetooth transports, Bluetooth
   device parsing/scanning/pairing, SDP encoding and response parsing, RFCOMM
@@ -563,8 +692,10 @@ The following checks pass in this environment:
   the helper control protocol, the mock server, settings
   persistence/validation, auto-connect state, Internet Test checks,
   `/etc/hosts` Microsoft blocking, the NetworkManager WiFi
-  scan/connect/share wrappers, the cellular telephony parser, and the
-  StatusNotifierItem/DBusMenu tray model.
+  scan/connect/share wrappers, the cellular telephony parser, the
+  StatusNotifierItem/DBusMenu tray model, and the reverse PdaNet server's
+  discovery reply, framing, source filtering, relay, shutdown, forwarding
+  and NAT rule lifecycle.
 - **Routing lifecycle test in a user network namespace**: three complete
   TUN up/down cycles, starting with stale current and legacy policy rules,
   leave no rules or interfaces behind. A live full-route test with a normal
@@ -614,6 +745,12 @@ Still required for a complete validation:
    `ip -6 rule show`, `ip -6 route show table 51820` and
    `ip -6 route get 2606:4700:4700::1111` show the unreachable guard while
    IPv6 LAN addresses still work.
+6. Unblock the Wi-Fi radio, enable PdaNet+ client mode on the phone, and
+   run `pdanet-linux serve start`. Confirm the discovery answer, the phone
+   VPN prompt, TUN forwarding/NAT, and that stopping the server removes the
+   `PDANET_SRV` chains, restores `ip_forward` and deletes the TUN. A
+   reverse-server live session has not yet been possible on this machine
+   because `wlan0` is soft-blocked.
 
 The USB transport flag `256` is confirmed both statically from the
 server-side mapping in `com.pdanet.d.run` (256 → transport id 1) and from
@@ -652,7 +789,8 @@ GDK_BACKEND=broadway BROADWAY_DISPLAY=:13 pdanet-linux gui
 | `pdanet_linux/transport.py` | ADB forwarding, Wi-Fi connection, discovery |
 | `pdanet_linux/bt.py` | Bluetooth pairing state, SDP lookup and RFCOMM |
 | `pdanet_linux/pump.py` | Bidirectional TUN/socket relay, statistics and throttle |
-| `pdanet_linux/netconfig.py` | TUN creation, policy routes, DNS and Microsoft block |
+| `pdanet_linux/netconfig.py` | TUN creation, policy routes, DNS, Microsoft block, reverse-mode forwarding/NAT |
+| `pdanet_linux/server.py` | Reverse PdaNet UDP discovery, TCP server and TUN relay |
 | `pdanet_linux/privileges.py` | pkexec/sudo helper launcher and FD passing |
 | `pdanet_linux/helper.py` | Root-side TUN helper |
 | `pdanet_linux/connection.py` | Shared connection lifecycle |
@@ -661,7 +799,7 @@ GDK_BACKEND=broadway BROADWAY_DISPLAY=:13 pdanet-linux gui
 | `pdanet_linux/selftest.py` | Internet Test checks |
 | `pdanet_linux/wifi.py` | NetworkManager scan/join and WiFi Share wrappers |
 | `pdanet_linux/cellular.py` | ADB telephony dump parser and signal reader |
-| `pdanet_linux/dialogs.py` | Settings, pairing, WiFi Share, Internet Test and Help dialogs |
+| `pdanet_linux/dialogs.py` | Settings, pairing, WiFi Share, Reverse PdaNet, Internet Test and Help dialogs |
 | `pdanet_linux/cli.py` | Command-line interface |
 | `pdanet_linux/gui.py` | GTK4/libadwaita application |
 | `pdanet_linux/mock_server.py` | Offline protocol simulator |
@@ -805,7 +943,14 @@ GDK_BACKEND=broadway BROADWAY_DISPLAY=:13 pdanet-linux gui
   unexpectedly while the app is running, press **Connect** again.
 - **WiFi Share requires NetworkManager and AP-mode support.** It uses shared
   IPv4 (NAT + dnsmasq); Windows hosted-network and ICS APIs are not available
-  on Linux.
+  on Linux. It shares any upstream connection, not only the PdaNet tunnel.
+- **Reverse PdaNet requires `iptables`, IPv4 forwarding and an AP-capable
+  Wi-Fi adapter.** A single-radio laptop cannot be both an access point and
+  a client of the same phone hotspot; use Ethernet, a second adapter, or a
+  PdaNet USB/Bluetooth link as the laptop's upstream. The phone must run a
+  licensed PdaNet+ with its client mode available. Live validation on the
+  development machine is pending because its Wi-Fi radio is currently
+  soft-blocked.
 - **The system tray needs a StatusNotifier host.** KDE Plasma, QuickShell,
   waybar and the GNOME AppIndicator extension work. Without a host, the
   window cannot be hidden to a tray; closing it exits instead.
@@ -828,7 +973,12 @@ GDK_BACKEND=broadway BROADWAY_DISPLAY=:13 pdanet-linux gui
 - `adb` and the TUN pump run as the desktop user.
 - The root helper is a small Python program that validates a JSON config,
   never invokes a shell, and only creates/configures/removes the TUN
-  interface, routes and DNS.
+  interface, routes and DNS. In reverse mode it additionally toggles IPv4
+  forwarding and installs/removes dedicated `PDANET_SRV` iptables chains;
+  it never edits the user's existing firewall chains.
+- The reverse server accepts clients only from the hotspot subnet and the
+  fixed phone address `10.1.19.2`, rejects all other source addresses, and
+  limits return traffic to established flows.
 - The unprivileged client listens on a user-owned `0600` Unix socket in
   `$XDG_RUNTIME_DIR/pdanet-linux`; the root helper connects back and
   authenticates with a one-time 256-bit token.

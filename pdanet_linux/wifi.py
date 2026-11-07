@@ -14,6 +14,7 @@ when the GUI starts or stops the hotspot.
 
 from __future__ import annotations
 
+import ipaddress
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -277,6 +278,94 @@ def share_stop() -> bool:
     except WifiError:
         existed = False
     return existed
+
+
+@dataclass(frozen=True)
+class ShareInfo:
+    """Runtime details of the active NetworkManager hotspot."""
+
+    interface: str
+    address: str
+    network: str
+    prefix: int
+    mac: str = ""
+
+    @property
+    def subnet(self) -> str:
+        return f"{self.address}/{self.prefix}"
+
+
+def _device_field(interface: str, key: str, *, timeout: float = 20.0) -> str:
+    output = _run(["-t", "-f", key, "device", "show", interface], timeout=timeout)
+    for line in output.splitlines():
+        name, _, value = line.partition(":")
+        if name == key or name.startswith(key + "["):
+            return value.strip()
+    return ""
+
+
+def interface_mac(interface: str) -> str:
+    """Return the MAC address of *interface* (best effort)."""
+    try:
+        with open(f"/sys/class/net/{interface}/address", encoding="ascii") as handle:
+            value = handle.read().strip().upper()
+        if value:
+            return value
+    except OSError:
+        pass
+    return _device_field(interface, "GENERAL.HWADDR").upper()
+
+
+def interface_ipv4(interface: str) -> tuple[str, str, int]:
+    """Return ``(address, network, prefix)`` for *interface*.
+
+    NetworkManager prints addresses as ``IP4.ADDRESS[1]:10.42.0.1/24``.
+    """
+    value = _device_field(interface, "IP4.ADDRESS")
+    if not value:
+        raise WifiError(f"{interface} has no IPv4 address")
+    # Multiple addresses are separated by " | " in nmcli terse output.
+    first = value.split("|", 1)[0].strip()
+    address, _, prefix_text = first.partition("/")
+    try:
+        prefix = int(prefix_text) if prefix_text else 24
+        network = str(
+            ipaddress.IPv4Interface(f"{address}/{prefix}").network
+        )
+    except ValueError as exc:
+        raise WifiError(f"invalid IPv4 address on {interface}: {first}") from exc
+    return address, network, prefix
+
+
+def share_interface() -> str | None:
+    """Return the interface carrying the ``pdanet-share`` connection."""
+    try:
+        output = _run(
+            ["-t", "-f", "NAME,DEVICE", "connection", "show", "--active"],
+            timeout=20.0,
+        )
+    except WifiError:
+        return None
+    for line in output.splitlines():
+        fields = split_terse(line)
+        if len(fields) >= 2 and fields[0] == SHARE_NAME and fields[1]:
+            return fields[1]
+    return None
+
+
+def share_info() -> ShareInfo | None:
+    """Return the active hotspot's address/network, or None when inactive."""
+    interface = share_interface()
+    if interface is None:
+        return None
+    address, network, prefix = interface_ipv4(interface)
+    return ShareInfo(
+        interface=interface,
+        address=address,
+        network=network,
+        prefix=prefix,
+        mac=interface_mac(interface),
+    )
 
 
 def share_active() -> bool:

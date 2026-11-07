@@ -242,6 +242,8 @@ def open_tun(
             "route_all": config.route_all,
             "dns": list(config.dns),
             "block_microsoft": config.block_microsoft,
+            "role": config.role,
+            "server_nat": config.server_nat,
             "bypass": [
                 {
                     "address": route.address,

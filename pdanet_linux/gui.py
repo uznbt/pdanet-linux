@@ -39,6 +39,7 @@ TRAY_CONNECT_BLUETOOTH = 12
 TRAY_DISCONNECT = 13
 TRAY_SIGNAL = 14
 TRAY_WIFI_SHARE = 20
+TRAY_REVERSE_TETHER = 25
 TRAY_SETTINGS = 21
 TRAY_BT_PAIRING = 22
 TRAY_WIFI_PAIRING = 23
@@ -499,6 +500,7 @@ class PdaNetWindow(Adw.ApplicationWindow):
         add("connect-bluetooth", lambda *_: self._begin_connect("bluetooth"))
         add("disconnect", lambda *_: self._disconnect())
         add("wifi-share", lambda *_: self._show_wifi_share())
+        add("reverse-tether", lambda *_: self._show_reverse_tether())
         add("windows-hotspot", lambda *_: self._show_windows_hotspot())
         add("settings", lambda *_: self._show_settings())
         add("bt-pairing", lambda *_: self._show_bt_pairing())
@@ -545,6 +547,7 @@ class PdaNetWindow(Adw.ApplicationWindow):
 
         tools = Gio.Menu()
         tools.append("WiFi Share (Beta)...", "win.wifi-share")
+        tools.append("Reverse PdaNet (phone uses laptop)...", "win.reverse-tether")
         tools.append("Settings", "win.settings")
         tools.append("Bluetooth Pairing...", "win.bt-pairing")
         tools.append("WiFi Pairing...", "win.wifi-pairing")
@@ -719,6 +722,18 @@ class PdaNetWindow(Adw.ApplicationWindow):
     def _share_state(self, active: bool) -> None:
         self._share_started = active
         self._toast("WiFi Share active" if active else "WiFi Share stopped")
+
+    def _show_reverse_tether(self) -> None:
+        dialogs.ReverseTetherDialog(self.settings, self._reverse_state).present(
+            self
+        )
+
+    def _reverse_state(self, active: bool) -> None:
+        self._toast(
+            "Reverse PdaNet server active"
+            if active
+            else "Reverse PdaNet server stopped"
+        )
 
     def _show_windows_hotspot(self) -> None:
         self._toast(
@@ -1540,6 +1555,11 @@ class PdaNetApp(Adw.Application):
                 TRAY_WIFI_SHARE,
                 "WiFi Share (Beta)...",
                 action=lambda: self._present_and(window._show_wifi_share),
+            ),
+            tray.MenuItem(
+                TRAY_REVERSE_TETHER,
+                "Reverse PdaNet...",
+                action=lambda: self._present_and(window._show_reverse_tether),
             ),
             tray.MenuItem(
                 TRAY_SETTINGS,

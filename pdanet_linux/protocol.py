@@ -40,6 +40,7 @@ user space.  ICMP is intentionally not handled by the phone.
 
 from __future__ import annotations
 
+import ipaddress
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
@@ -47,6 +48,13 @@ from enum import IntEnum
 HEADER_SIZE = 32
 CLIENT_HEADER = struct.Struct(">8I")
 SERVER_HEADER = struct.Struct("<8I")
+
+#: Marker used in the 64 byte UDP discovery handshake.  The phone client
+#: accepts any value between 5000 and 10000; the existing client code uses
+#: 5014 for its own requests, so the reverse server answers with the same
+#: value.  The field is little endian on the wire (see build_discovery_reply).
+DISCOVERY_MARKER = 5014
+DISCOVERY_SIZE = 64
 
 # Maximum payload accepted by the phone for a non-init packet.  The server
 # rejects headers with ``length > 10240`` (com.pdanet.d, "Corrupted data
@@ -170,6 +178,24 @@ class ServerPacket:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ClientPacket:
+    """A packet sent by the phone to a PdaNet server (reverse mode)."""
+
+    header: ClientHeader
+    payload: bytes = b""
+
+    @property
+    def command(self) -> int:
+        return self.header.command
+
+    def __repr__(self) -> str:  # keep logs compact
+        return (
+            f"ClientPacket(command={self.command}, length={len(self.payload)}, "
+            f"flags={self.header.flags})"
+        )
+
+
 def build_init(transport: Transport | int = Transport.USB) -> bytes:
     """Build the first packet sent after connecting.
 
@@ -203,6 +229,81 @@ def build_raw_ip(packet: bytes) -> bytes:
 
 def build_shutdown() -> bytes:
     return ClientHeader(command=Command.SHUTDOWN).pack()
+
+
+def build_server_raw_ip(
+    packet: bytes, *, sequence: int = 0, connection: int = 0
+) -> bytes:
+    """Wrap a raw IPv4 packet for a PdaNet *client* (reverse mode).
+
+    Phone clients read raw IP from a type 64 server header, exactly like the
+    normal desktop client does.  The header is little endian on the wire.
+    """
+    if not is_ipv4(packet):
+        raise ValueError("not an IPv4 packet")
+    if len(packet) > MAX_SERVER_PAYLOAD:
+        raise ValueError("IP packet too large for PdaNet")
+    return (
+        ServerHeader(
+            command=Command.RAW_IP,
+            connection=connection,
+            sequence=sequence,
+            length=len(packet),
+        ).pack()
+        + packet
+    )
+
+
+def build_discovery_reply(
+    *,
+    client_ip: str,
+    server_ip: str,
+    mac: str = "",
+    name: str = "PdaNet Linux",
+    marker: int = DISCOVERY_MARKER,
+) -> bytes:
+    """Build the 64 byte answer sent to a PdaNet phone client.
+
+    The phone client sends its request to UDP 8000, reads three integers with
+    a big-endian reader and byte-swaps them (``com.foxfi.ap.b``).  The phone
+    server therefore writes all three as little endian and copies IP
+    addresses as raw network-order bytes.  Mirroring that layout here keeps
+    the packet compatible with both the phone and our own
+    :func:`pdanet_linux.transport._parse_discovery`.
+    """
+    if not 5000 <= marker <= 10000:
+        raise ValueError("discovery marker must be between 5000 and 10000")
+    client = ipaddress.IPv4Address(client_ip).packed
+    server = ipaddress.IPv4Address(server_ip).packed
+    packet = bytearray(DISCOVERY_SIZE)
+    struct.pack_into("<I", packet, 0, marker)
+    packet[4:8] = server
+    packet[8:12] = client
+    mac_raw = mac.encode("ascii", "replace")[:17]
+    packet[12 : 12 + len(mac_raw)] = mac_raw
+    name_raw = name.encode("utf-8", "replace")[:31]
+    packet[32 : 32 + len(name_raw)] = name_raw
+    return bytes(packet)
+
+
+def parse_client_packet(data: bytes) -> ClientPacket:
+    """Parse one complete phone -> server packet.
+
+    *data* must include the 32 byte header and the full payload.  The caller
+    is responsible for framing; :class:`pdanet_linux.server.PdaNetServer`
+    keeps a receive buffer for that.
+    """
+    if len(data) < HEADER_SIZE:
+        raise ValueError(f"need at least {HEADER_SIZE} bytes")
+    header = ClientHeader.unpack(data)
+    if header.length > MAX_SERVER_PAYLOAD:
+        raise ValueError(f"payload too large: {header.length}")
+    if len(data) != HEADER_SIZE + header.length:
+        raise ValueError(
+            f"packet length mismatch: header says {header.length}, "
+            f"got {len(data) - HEADER_SIZE}"
+        )
+    return ClientPacket(header=header, payload=data[HEADER_SIZE:])
 
 
 def is_ipv4(packet: bytes) -> bool:

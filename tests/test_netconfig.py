@@ -49,6 +49,36 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(netconfig.NetConfigError):
             netconfig.BypassRoute(address="192.168.1.1", device="bad dev").validate()
 
+    def test_server_config_requires_server_address_and_no_default_route(self):
+        config = netconfig.TunConfig(
+            role=netconfig.ROLE_SERVER,
+            address=netconfig.SERVER_ADDRESS,
+            route_all=False,
+            dns=(),
+        ).validate()
+        self.assertEqual(config.role, netconfig.ROLE_SERVER)
+        with self.assertRaises(netconfig.NetConfigError):
+            netconfig.TunConfig(
+                role=netconfig.ROLE_SERVER,
+                address="10.1.19.2/24",
+                route_all=False,
+            ).validate()
+        with self.assertRaises(netconfig.NetConfigError):
+            netconfig.TunConfig(
+                role=netconfig.ROLE_SERVER,
+                address=netconfig.SERVER_ADDRESS,
+                route_all=True,
+            ).validate()
+
+    def test_make_server_config_ignores_client_defaults(self):
+        config = netconfig.make_config(
+            role=netconfig.ROLE_SERVER, route_all=True, dns=("1.1.1.1",)
+        )
+        self.assertEqual(config.address, netconfig.SERVER_ADDRESS)
+        self.assertFalse(config.route_all)
+        self.assertEqual(config.dns, ())
+        self.assertFalse(config.block_microsoft)
+
 
 class RouteGetTests(unittest.TestCase):
     def test_route_with_gateway(self):
@@ -268,6 +298,184 @@ unreachable 2001:db8:dead::/48 metric 4278198272 pref medium
         self.assertTrue(any("link del pdanet0" in c for c in flat))
         self.assertEqual(configurator._lock_fd, -1)
         self.assertEqual(configurator.fd, -1)
+
+    def test_server_up_and_down_installs_forwarding_and_nat(self):
+        ip_calls = []
+        ipt_calls = []
+
+        def fake_run_ip(*args, check=True):
+            ip_calls.append(args)
+            return _completed()
+
+        def fake_iptables(*args, check=True):
+            ipt_calls.append(args)
+            return _completed()
+
+        config = netconfig.TunConfig(
+            role=netconfig.ROLE_SERVER,
+            address=netconfig.SERVER_ADDRESS,
+            route_all=False,
+            dns=(),
+        )
+        with mock.patch.object(netconfig, "open_tun_fd", return_value=(58, "pdanet0")), \
+             mock.patch.object(netconfig, "run_ip", side_effect=fake_run_ip), \
+             mock.patch.object(netconfig, "run_iptables", side_effect=fake_iptables), \
+             mock.patch.object(
+                 netconfig.NetConfigurator, "_read_forwarding", return_value="0"
+             ), \
+             mock.patch.object(
+                 netconfig.NetConfigurator, "_write_forwarding"
+             ) as write_forwarding, \
+             mock.patch.object(
+                 netconfig.NetConfigurator, "_read_forwarding_marker",
+                 return_value=None
+             ), \
+             mock.patch.object(
+                 netconfig.NetConfigurator, "_write_forwarding_marker"
+             ) as write_marker, \
+             mock.patch.object(
+                 netconfig.NetConfigurator, "_remove_forwarding_marker"
+             ) as remove_marker:
+            configurator = netconfig.NetConfigurator(config)
+            self.assertEqual(configurator.up(), 58)
+            configurator.down()
+
+        flat_ip = [" ".join(call) for call in ip_calls]
+        self.assertTrue(any("addr replace 10.1.19.1/24 dev pdanet0" in c for c in flat_ip))
+        self.assertFalse(any("route replace default" in c for c in flat_ip))
+        self.assertFalse(any("rule add" in c for c in flat_ip))
+        self.assertTrue(any("link del pdanet0" in c for c in flat_ip))
+
+        flat_ipt = [" ".join(call) for call in ipt_calls]
+        self.assertTrue(
+            any(
+                "filter -A PDANET_SRV -i pdanet0 -s 10.1.19.2/32 -j ACCEPT"
+                in c
+                for c in flat_ipt
+            )
+        )
+        self.assertTrue(
+            any(
+                "filter -I FORWARD 1 -j PDANET_SRV" in c for c in flat_ipt
+            )
+        )
+        self.assertTrue(
+            any(
+                "nat -A PDANET_SRV -s 10.1.19.0/24 ! -o pdanet0 "
+                "-j MASQUERADE" in c
+                for c in flat_ipt
+            )
+        )
+        self.assertTrue(
+            any("nat -I POSTROUTING 1 -j PDANET_SRV" in c for c in flat_ipt)
+        )
+        self.assertTrue(
+            any("filter -X PDANET_SRV" in c for c in flat_ipt)
+        )
+        self.assertEqual(
+            [call.args[0] for call in write_forwarding.call_args_list],
+            ["1", "0"],
+        )
+        write_marker.assert_called_once_with("0")
+        remove_marker.assert_called_once_with()
+        self.assertFalse(configurator._server_rules)
+        self.assertFalse(configurator._forwarding_changed)
+
+    def test_forwarding_marker_restores_crashed_previous_value(self):
+        config = netconfig.TunConfig(
+            role=netconfig.ROLE_SERVER,
+            address=netconfig.SERVER_ADDRESS,
+            route_all=False,
+            dns=(),
+        )
+        configurator = netconfig.NetConfigurator(config)
+        with mock.patch.object(
+            netconfig.NetConfigurator, "_read_forwarding", return_value="1"
+        ), mock.patch.object(
+            netconfig.NetConfigurator, "_read_forwarding_marker",
+            return_value="0",
+        ), mock.patch.object(
+            netconfig.NetConfigurator, "_write_forwarding"
+        ) as write_forwarding, mock.patch.object(
+            netconfig.NetConfigurator, "_write_forwarding_marker"
+        ) as write_marker, mock.patch.object(
+            netconfig.NetConfigurator, "_remove_forwarding_marker"
+        ) as remove_marker:
+            configurator._enable_forwarding()
+            self.assertTrue(configurator._forwarding_changed)
+            # Forwarding was already on; only the marker says what to
+            # restore, so do not overwrite it during startup.
+            write_forwarding.assert_not_called()
+            configurator._restore_forwarding()
+        write_forwarding.assert_called_once_with("0")
+        write_marker.assert_not_called()
+        remove_marker.assert_called_once_with()
+        self.assertFalse(configurator._forwarding_changed)
+
+    def test_forwarding_marker_is_written_when_forwarding_is_enabled(self):
+        config = netconfig.TunConfig(
+            role=netconfig.ROLE_SERVER,
+            address=netconfig.SERVER_ADDRESS,
+            route_all=False,
+            dns=(),
+        )
+        configurator = netconfig.NetConfigurator(config)
+        with mock.patch.object(
+            netconfig.NetConfigurator, "_read_forwarding", return_value="0"
+        ), mock.patch.object(
+            netconfig.NetConfigurator, "_read_forwarding_marker",
+            return_value=None,
+        ), mock.patch.object(
+            netconfig.NetConfigurator, "_write_forwarding"
+        ) as write_forwarding, mock.patch.object(
+            netconfig.NetConfigurator, "_write_forwarding_marker"
+        ) as write_marker:
+            configurator._enable_forwarding()
+        write_marker.assert_called_once_with("0")
+        write_forwarding.assert_called_once_with("1")
+        self.assertTrue(configurator._forwarding_changed)
+
+    def test_server_nat_can_be_disabled(self):
+        ipt_calls = []
+
+        def fake_iptables(*args, check=True):
+            ipt_calls.append(args)
+            return _completed()
+
+        config = netconfig.TunConfig(
+            role=netconfig.ROLE_SERVER,
+            address=netconfig.SERVER_ADDRESS,
+            route_all=False,
+            dns=(),
+            server_nat=False,
+        )
+        with mock.patch.object(netconfig, "open_tun_fd", return_value=(59, "pdanet0")), \
+             mock.patch.object(netconfig, "run_ip", return_value=_completed()), \
+             mock.patch.object(netconfig, "run_iptables", side_effect=fake_iptables), \
+             mock.patch.object(
+                 netconfig.NetConfigurator, "_read_forwarding", return_value="1"
+             ), \
+             mock.patch.object(
+                 netconfig.NetConfigurator, "_write_forwarding"
+             ), \
+             mock.patch.object(
+                 netconfig.NetConfigurator, "_read_forwarding_marker",
+                 return_value=None
+             ), \
+             mock.patch.object(
+                 netconfig.NetConfigurator, "_write_forwarding_marker"
+             ), \
+             mock.patch.object(
+                 netconfig.NetConfigurator, "_remove_forwarding_marker"
+             ):
+            configurator = netconfig.NetConfigurator(config)
+            configurator.up()
+            configurator.down()
+
+        flat = [" ".join(call) for call in ipt_calls]
+        self.assertTrue(any("filter -N PDANET_SRV" in c for c in flat))
+        self.assertFalse(any("nat -N PDANET_SRV" in c for c in flat))
+        self.assertFalse(any("MASQUERADE" in c for c in flat))
 
     def test_del_rules_removes_every_entry_at_pref(self):
         remaining = 3

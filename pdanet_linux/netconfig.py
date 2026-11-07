@@ -46,6 +46,14 @@ DEFAULT_ADDRESS = "10.1.19.2/24"
 DEFAULT_MTU = 1500
 DEFAULT_TUN = "pdanet0"
 DEFAULT_DNS = ("8.8.8.8",)
+ROLE_CLIENT = "client"
+ROLE_SERVER = "server"
+SERVER_ADDRESS = "10.1.19.1/24"
+SERVER_CLIENT_ADDRESS = "10.1.19.2"
+SERVER_NETWORK = "10.1.19.0/24"
+SERVER_CHAIN = "PDANET_SRV"
+IP_FORWARD_PATH = "/proc/sys/net/ipv4/ip_forward"
+IP_FORWARD_STATE_PATH = "/run/pdanet-linux.ip_forward"
 ROUTE_TABLE = 51820
 # Policy rules must sort *before* the kernel's main table (preference 32766)
 # or the normal Wi-Fi default route wins and the tunnel is never consulted.
@@ -213,6 +221,37 @@ def run_ip(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return proc
 
 
+def _iptables() -> str:
+    for candidate in (
+        "/usr/sbin/iptables",
+        "/sbin/iptables",
+        "/usr/bin/iptables",
+        "/bin/iptables",
+    ):
+        if os.path.exists(candidate):
+            return candidate
+    found = shutil.which("iptables")
+    if not found:
+        raise NetConfigError(
+            "the 'iptables' command was not found (install iptables or "
+            "nftables/iptables-nft) to use reverse PdaNet server mode"
+        )
+    return found
+
+
+def run_iptables(
+    *args: str, check: bool = True
+) -> subprocess.CompletedProcess[str]:
+    # -w makes concurrent firewall tools wait for the xtables lock instead of
+    # failing with "Resource temporarily unavailable".
+    cmd = [_iptables(), "-w", "5", *args]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+    if check and proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise NetConfigError(f"{' '.join(cmd)} failed: {detail}")
+    return proc
+
+
 def _global_ipv6_prefixes(output: str) -> list[str]:
     """Return on-link global IPv6 prefixes from ``ip -6 route show``.
 
@@ -275,17 +314,35 @@ class TunConfig:
     dns: tuple[str, ...] = DEFAULT_DNS
     bypass: list[BypassRoute] = field(default_factory=list)
     block_microsoft: bool = False
+    role: str = ROLE_CLIENT
+    server_nat: bool = True
 
     def validate(self) -> "TunConfig":
         validate_name(self.name)
+        if self.role not in (ROLE_CLIENT, ROLE_SERVER):
+            raise NetConfigError(f"invalid tunnel role: {self.role!r}")
         iface = ipaddress.IPv4Interface(self.address)
-        # The phone only forwards packets whose source is 10.1.19.2
-        # (com.pdanet.a.d compares the source address with this constant).
-        if iface.ip != ipaddress.IPv4Address("10.1.19.2"):
-            raise NetConfigError(
-                "PdaNet requires the TUN address 10.1.19.2 "
-                "(the phone drops packets from other source addresses)"
-            )
+        if self.role == ROLE_CLIENT:
+            # The phone only forwards packets whose source is 10.1.19.2
+            # (com.pdanet.a.d compares the source address with this constant).
+            if iface.ip != ipaddress.IPv4Address(SERVER_CLIENT_ADDRESS):
+                raise NetConfigError(
+                    "PdaNet requires the TUN address 10.1.19.2 "
+                    "(the phone drops packets from other source addresses)"
+                )
+        else:
+            if iface.ip != ipaddress.IPv4Address("10.1.19.1") or iface.network != (
+                ipaddress.IPv4Network(SERVER_NETWORK)
+            ):
+                raise NetConfigError(
+                    "reverse PdaNet server requires the TUN address "
+                    f"{SERVER_ADDRESS}"
+                )
+            if self.route_all:
+                raise NetConfigError(
+                    "reverse PdaNet server must not replace the default route "
+                    "(set route_all=False)"
+                )
         if not 68 <= self.mtu <= 65535:
             raise NetConfigError("MTU must be between 68 and 65535")
         for addr in self.dns:
@@ -345,6 +402,9 @@ class NetConfigurator:
         self._link_added = False
         self._hosts_blocked = False
         self._ipv6_guard = False
+        self._server_rules = False
+        self._forwarding_changed = False
+        self._forwarding_previous: str | None = None
 
     def _lock(self) -> None:
         """Only one tunnel may own table 51820 at a time."""
@@ -478,20 +538,38 @@ class NetConfigurator:
         if not self.config.name:
             return
         proc = run_ip("addr", "show", "dev", self.config.name, check=False)
-        if proc.returncode == 0 and DEFAULT_ADDRESS.split("/", 1)[0] in proc.stdout:
-            run_ip("link", "del", self.config.name, check=False)
+        if proc.returncode == 0:
+            # A crashed helper may have left either the client or the
+            # reverse-server address behind.  The table lock proves that no
+            # live PdaNet process still owns it.
+            known = {
+                DEFAULT_ADDRESS.split("/", 1)[0],
+                SERVER_ADDRESS.split("/", 1)[0],
+            }
+            if any(address in proc.stdout for address in known):
+                run_ip("link", "del", self.config.name, check=False)
 
     def up(self) -> int:
         self._lock()
         # Clear a block left behind by a crashed helper even if the option
         # is disabled for this connection.
-        try:
-            remove_microsoft_block()
-        except OSError:
-            pass
+        if self.config.role == ROLE_CLIENT:
+            try:
+                remove_microsoft_block()
+            except OSError:
+                pass
+            # Restore forwarding if a reverse server crashed previously.
+            # The lock above guarantees that no live server owns it now.
+            marker = self._read_forwarding_marker()
+            if marker is not None:
+                try:
+                    self._write_forwarding(marker)
+                    self._remove_forwarding_marker()
+                except NetConfigError:
+                    pass
         # Clear leftovers from a previous crashed instance.  The lock above
         # guarantees that nobody else is using this table right now.
-        if self.config.route_all:
+        if self.config.role == ROLE_CLIENT and self.config.route_all:
             self._del_all_rules()
             self._del_all_rules6()
             run_ip("route", "flush", "table", str(ROUTE_TABLE), check=False)
@@ -499,6 +577,8 @@ class NetConfigurator:
                 "-6", "route", "flush", "table", str(ROUTE_TABLE),
                 check=False,
             )
+            self._remove_stale_link()
+        elif self.config.role == ROLE_SERVER:
             self._remove_stale_link()
 
         # Try a few names so a stale interface does not block startup.
@@ -521,7 +601,10 @@ class NetConfigurator:
             self._run("addr", "replace", self.config.address, "dev", self.name)
             self._run("link", "set", "dev", self.name, "up")
 
-            if self.config.route_all:
+            if self.config.role == ROLE_SERVER:
+                self._enable_forwarding()
+                self._install_server_rules()
+            elif self.config.route_all:
                 # Put only our table's default route behind the policy rule;
                 # the main table and its default route are left untouched.
                 if not self._route_add("default", table=ROUTE_TABLE, dev=self.name):
@@ -566,8 +649,9 @@ class NetConfigurator:
 
                 self._configure_ipv6_guard()
 
-            self._configure_dns()
-            if self.config.block_microsoft:
+            if self.config.role == ROLE_CLIENT:
+                self._configure_dns()
+            if self.config.role == ROLE_CLIENT and self.config.block_microsoft:
                 self._hosts_blocked = True
                 try:
                     apply_microsoft_block()
@@ -579,6 +663,142 @@ class NetConfigurator:
         except Exception:
             self.down()
             raise
+
+    # -- reverse PdaNet server ----------------------------------------
+    def _read_forwarding(self) -> str:
+        try:
+            with open(IP_FORWARD_PATH, "r", encoding="ascii") as handle:
+                return handle.read().strip()
+        except OSError as exc:
+            raise NetConfigError(f"cannot read {IP_FORWARD_PATH}: {exc}") from exc
+
+    def _write_forwarding(self, value: str) -> None:
+        try:
+            with open(IP_FORWARD_PATH, "w", encoding="ascii") as handle:
+                handle.write(value)
+        except OSError as exc:
+            raise NetConfigError(f"cannot set {IP_FORWARD_PATH}: {exc}") from exc
+
+    def _enable_forwarding(self) -> None:
+        previous = self._read_forwarding()
+        marker = self._read_forwarding_marker()
+        if marker is not None:
+            # A previous server or helper crashed while forwarding was
+            # enabled.  The marker remembers the value we must restore.
+            self._forwarding_previous = marker
+            self._forwarding_changed = True
+            if previous != "1":
+                self._write_forwarding("1")
+            return
+        self._forwarding_previous = previous
+        if previous == "1":
+            return
+        self._write_forwarding_marker(previous)
+        self._write_forwarding("1")
+        self._forwarding_changed = True
+
+    def _read_forwarding_marker(self) -> str | None:
+        try:
+            with open(IP_FORWARD_STATE_PATH, "r", encoding="ascii") as handle:
+                value = handle.read().strip()
+        except OSError:
+            return None
+        return value if value in ("0", "1") else None
+
+    def _write_forwarding_marker(self, value: str) -> None:
+        try:
+            fd = os.open(
+                IP_FORWARD_STATE_PATH,
+                os.O_CREAT | os.O_TRUNC | os.O_WRONLY,
+                0o600,
+            )
+            with os.fdopen(fd, "w", encoding="ascii") as handle:
+                handle.write(value)
+        except OSError:
+            # The marker only helps after a crash.  Forwarding still works
+            # and normal shutdown can restore the in-memory previous value.
+            pass
+
+    def _remove_forwarding_marker(self) -> None:
+        try:
+            os.unlink(IP_FORWARD_STATE_PATH)
+        except OSError:
+            pass
+
+    def _restore_forwarding(self) -> None:
+        if not self._forwarding_changed:
+            return
+        try:
+            self._write_forwarding(self._forwarding_previous or "0")
+        except NetConfigError:
+            # Keep the marker so the next start can still restore the value.
+            return
+        self._remove_forwarding_marker()
+        self._forwarding_changed = False
+        self._forwarding_previous = None
+
+    def _remove_server_chain(self, table: str, parent: str) -> None:
+        """Remove our jumps and chain from one iptables table (best effort)."""
+        try:
+            # Remove every stale jump; a crash plus a concurrent start can
+            # leave more than one behind, and -X would then fail.
+            for _ in range(16):
+                proc = run_iptables(
+                    "-t", table, "-D", parent, "-j", SERVER_CHAIN, check=False
+                )
+                if proc.returncode != 0:
+                    break
+            run_iptables("-t", table, "-F", SERVER_CHAIN, check=False)
+            run_iptables("-t", table, "-X", SERVER_CHAIN, check=False)
+        except (NetConfigError, OSError):
+            pass
+
+    def _remove_server_rules(self) -> None:
+        self._remove_server_chain("filter", "FORWARD")
+        self._remove_server_chain("nat", "POSTROUTING")
+        self._server_rules = False
+
+    def _install_server_rules(self) -> None:
+        """Allow only the phone's TUN subnet through and NAT it upstream.
+
+        The rules live in a dedicated chain so cleanup never touches the
+        user's firewall.  Incoming packets are accepted only from the fixed
+        phone address 10.1.19.2; return traffic is limited to established
+        flows.  NAT excludes the TUN device, so it always uses the laptop's
+        normal upstream interface (Ethernet, Wi-Fi or another PdaNet link).
+        """
+        self._remove_server_rules()
+        self._server_rules = True
+
+        # Reuse an empty leftover chain; the name is reserved for this app.
+        run_iptables("-t", "filter", "-N", SERVER_CHAIN, check=False)
+        run_iptables("-t", "filter", "-F", SERVER_CHAIN)
+        run_iptables(
+            "-t", "filter", "-A", SERVER_CHAIN,
+            "-i", self.name, "-s", f"{SERVER_CLIENT_ADDRESS}/32", "-j", "ACCEPT",
+        )
+        run_iptables(
+            "-t", "filter", "-A", SERVER_CHAIN,
+            "-o", self.name, "-m", "conntrack",
+            "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT",
+        )
+        run_iptables(
+            "-t", "filter", "-A", SERVER_CHAIN,
+            "-i", self.name, "-j", "DROP",
+        )
+        run_iptables("-t", "filter", "-I", "FORWARD", "1", "-j", SERVER_CHAIN)
+
+        if self.config.server_nat:
+            run_iptables("-t", "nat", "-N", SERVER_CHAIN, check=False)
+            run_iptables("-t", "nat", "-F", SERVER_CHAIN)
+            run_iptables(
+                "-t", "nat", "-A", SERVER_CHAIN,
+                "-s", SERVER_NETWORK, "!", "-o", self.name,
+                "-j", "MASQUERADE",
+            )
+            run_iptables(
+                "-t", "nat", "-I", "POSTROUTING", "1", "-j", SERVER_CHAIN
+            )
 
     def _configure_dns(self) -> None:
         if not self.config.dns:
@@ -616,7 +836,10 @@ class NetConfigurator:
                     capture_output=True, text=True, timeout=15, check=False,
                 )
             self._dns_configured = False
-        if self.config.route_all:
+        if self.config.role == ROLE_SERVER:
+            self._remove_server_rules()
+            self._restore_forwarding()
+        elif self.config.route_all:
             # Flush by preference instead of relying on the per-object flags:
             # up() may have failed halfway through the LAN rules, and a
             # previous crashed helper may have left extra rules behind.
@@ -673,9 +896,18 @@ def make_config(
     dns: tuple[str, ...] = DEFAULT_DNS,
     bypass_host: str | None = None,
     block_microsoft: bool = False,
+    role: str = ROLE_CLIENT,
+    server_nat: bool = True,
 ) -> TunConfig:
     bypass: list[BypassRoute] = []
-    if route_all and bypass_host:
+    if role == ROLE_SERVER:
+        # Server mode never touches the local default route or DNS.  The
+        # TUN's /24 route is enough to deliver return traffic to the phone.
+        address = SERVER_ADDRESS
+        route_all = False
+        dns = ()
+        block_microsoft = False
+    elif route_all and bypass_host:
         bypass.append(route_get(bypass_host))
     return TunConfig(
         name=name,
@@ -685,4 +917,6 @@ def make_config(
         dns=dns,
         bypass=bypass,
         block_microsoft=block_microsoft,
+        role=role,
+        server_nat=server_nat,
     ).validate()

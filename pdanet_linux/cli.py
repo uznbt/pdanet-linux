@@ -3,14 +3,27 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import secrets
 import shutil
 import signal
 import socket
 import sys
+import tempfile
 import time
 
-from . import __version__, bt, cellular, netconfig, privileges, selftest, transport, wifi
+from . import (
+    __version__,
+    bt,
+    cellular,
+    netconfig,
+    privileges,
+    selftest,
+    server as pdanet_server,
+    transport,
+    wifi,
+)
 from .connection import ConnectOptions, PdaNetConnection
 from .protocol import summarize
 from .pump import Stats, format_bytes
@@ -281,7 +294,18 @@ def cmd_wifi_connect(args: argparse.Namespace) -> int:
 
 def cmd_share(args: argparse.Namespace) -> int:
     if args.share_action == "status":
-        print("Wi-Fi Share is active" if wifi.share_active() else "Wi-Fi Share is not active")
+        try:
+            info = wifi.share_info()
+        except wifi.WifiError as exc:
+            print(f"Wi-Fi Share check failed: {exc}", file=sys.stderr)
+            return 1
+        if info is not None:
+            print(
+                f"Wi-Fi Share is active on {info.interface} "
+                f"({info.subnet})"
+            )
+        else:
+            print("Wi-Fi Share is not active")
         return 0
     if args.share_action == "stop":
         if wifi.share_stop():
@@ -300,13 +324,322 @@ def cmd_share(args: argparse.Namespace) -> int:
     if output:
         print(output)
     print(f"Wi-Fi Share started: {args.ssid}")
+    print(
+        "On the phone: Settings > Wi-Fi, select this network and enter the "
+        "same password."
+    )
+    print(
+        "For PdaNet client mode (phone uses this computer's Internet), run "
+        f"'{PROG} serve start'."
+    )
     if not tunnel_up:
         print(
-            "warning: no pdanet* tunnel is up; the hotspot works but has no "
-            "Internet until you connect PdaNet.",
+            "note: no pdanet* tunnel is up. The hotspot still shares any "
+            "other Internet connection on this computer; connect PdaNet "
+            "first if this computer has no Internet of its own.",
             file=sys.stderr,
         )
     return 0
+
+
+# ----------------------------------------------------------------------
+# Reverse PdaNet server
+# ----------------------------------------------------------------------
+def _serve_state_path() -> str:
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    if base and os.path.isdir(base):
+        directory = os.path.join(base, "pdanet-linux")
+    else:
+        directory = os.path.join(
+            tempfile.gettempdir(), f"pdanet-linux-{os.getuid()}"
+        )
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+    return os.path.join(directory, "server.json")
+
+
+def _read_serve_state() -> dict | None:
+    try:
+        with open(_serve_state_path(), encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _write_serve_state(value: dict) -> None:
+    path = _serve_state_path()
+    fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(value, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
+def _remove_serve_state() -> None:
+    try:
+        os.unlink(_serve_state_path())
+    except OSError:
+        pass
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _pid_is_pdanet(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            return b"pdanet" in handle.read().lower()
+    except OSError:
+        # /proc may be unavailable; the PID check above is still useful.
+        return True
+
+
+def _wait_share_info(timeout: float = 20.0) -> wifi.ShareInfo:
+    deadline = time.monotonic() + timeout
+    last: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            info = wifi.share_info()
+        except wifi.WifiError as exc:
+            last = exc
+            info = None
+        if info is not None:
+            return info
+        time.sleep(0.5)
+    detail = f": {last}" if last else ""
+    raise wifi.WifiError(
+        "the hotspot was activated but did not get an IPv4 address"
+        + detail
+    )
+
+
+def _serve_sigterm(_signum: int, _frame: object) -> None:
+    raise KeyboardInterrupt
+
+
+def _serve_status() -> int:
+    state = _read_serve_state()
+    if state is None:
+        print("Reverse PdaNet server is not running")
+    else:
+        pid = int(state.get("pid") or 0)
+        if not _pid_alive(pid) or not _pid_is_pdanet(pid):
+            _remove_serve_state()
+            print("Reverse PdaNet server is not running (stale state removed)")
+        else:
+            print(f"Reverse PdaNet server is running (pid {pid})")
+            if state.get("ssid"):
+                print(f"  Hotspot : {state['ssid']}")
+                if state.get("password"):
+                    print(f"  Password: {state['password']}")
+            if state.get("interface"):
+                print(
+                    f"  Laptop  : {state.get('address', '?')} on "
+                    f"{state['interface']} ({state.get('network', '?')})"
+                )
+            print(
+                f"  Ports   : TCP {state.get('port', '?')}, "
+                f"UDP {state.get('discovery_port', '?')}"
+            )
+            print(
+                "  Phone   : connect to the hotspot, then open PdaNet+ > "
+                "'Connect to a PdaNet Hotspot'."
+            )
+    try:
+        info = wifi.share_info()
+    except wifi.WifiError:
+        info = None
+    if info is not None:
+        print(f"Hotspot is active on {info.interface} ({info.subnet})")
+    else:
+        print("Hotspot is not active")
+    return 0
+
+
+def _serve_stop() -> int:
+    state = _read_serve_state()
+    if state is None:
+        print("Reverse PdaNet server is not running")
+        return 0
+    pid = int(state.get("pid") or 0)
+    if not _pid_alive(pid) or not _pid_is_pdanet(pid):
+        _remove_serve_state()
+        print("Reverse PdaNet server is not running (stale state removed)")
+        return 0
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as exc:
+        print(f"cannot stop process {pid}: {exc}", file=sys.stderr)
+        return 1
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            _remove_serve_state()
+            print("Reverse PdaNet server stopped")
+            return 0
+        time.sleep(0.25)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+    _remove_serve_state()
+    print("Reverse PdaNet server stopped (forced)")
+    return 0
+
+
+def _serve_start(args: argparse.Namespace) -> int:
+    existing = _read_serve_state()
+    if existing is not None:
+        pid = int(existing.get("pid") or 0)
+        if _pid_alive(pid) and _pid_is_pdanet(pid):
+            print(
+                f"Reverse PdaNet server is already running (pid {pid}); "
+                f"use '{PROG} serve stop' first.",
+                file=sys.stderr,
+            )
+            return 1
+        _remove_serve_state()
+
+    previous_sigterm = signal.signal(signal.SIGTERM, _serve_sigterm)
+    started_hotspot = False
+    tun = None
+    srv: pdanet_server.PdaNetServer | None = None
+    info: wifi.ShareInfo | None = None
+    ssid = args.ssid
+    password: str | None = None
+    try:
+        if args.no_hotspot:
+            info = wifi.share_info()
+            if info is None:
+                raise wifi.WifiError(
+                    "--no-hotspot requires an active NetworkManager hotspot "
+                    f"named '{wifi.SHARE_NAME}'"
+                )
+            print(
+                f"Using the existing hotspot on {info.interface} "
+                f"({info.subnet})"
+            )
+        else:
+            info = wifi.share_info()
+            if info is not None:
+                print(
+                    f"Using the existing hotspot on {info.interface} "
+                    f"({info.subnet})"
+                )
+            else:
+                password = args.password or secrets.token_urlsafe(9)
+                if not 8 <= len(password) <= 63:
+                    raise wifi.WifiError(
+                        "the WPA2 password must be 8 to 63 characters"
+                    )
+                wifi.share_start(
+                    ssid, password, interface=args.interface
+                )
+                started_hotspot = True
+                info = _wait_share_info()
+
+        allowed = [info.network, "127.0.0.0/8", *args.allow]
+        config = netconfig.make_config(
+            role=netconfig.ROLE_SERVER,
+            name=args.tun,
+            mtu=args.mtu,
+            server_nat=not args.no_nat,
+        )
+        tun = privileges.open_tun(
+            config, privilege=args.privilege, log=log_line(args.verbose)
+        )
+        srv = pdanet_server.PdaNetServer(
+            tun.fd,
+            tun_name=tun.name,
+            host=args.listen,
+            port=args.port,
+            discovery_port=args.discovery_port,
+            server_ip=info.address,
+            mac=info.mac,
+            name=args.name or _default_model(),
+            allowed_networks=allowed,
+            log=log_line(args.verbose),
+            verbose=args.verbose,
+        )
+        srv.start()
+        _write_serve_state(
+            {
+                "pid": os.getpid(),
+                "started": time.time(),
+                "ssid": ssid if started_hotspot else "",
+                "password": password or "",
+                "interface": info.interface,
+                "address": info.address,
+                "network": info.network,
+                "mac": info.mac,
+                "port": srv.bound_port,
+                "discovery_port": srv.discovery_bound_port,
+                "tun": tun.name,
+            }
+        )
+
+        print("Reverse PdaNet server is running.")
+        if started_hotspot:
+            print(f"  Hotspot : {ssid}  (WPA2 password: {password})")
+        else:
+            print(
+                f"  Hotspot : existing on {info.interface} ({info.subnet})"
+            )
+        print(
+            f"  Laptop  : {info.address} on {info.interface}"
+            + (f" ({info.mac})" if info.mac else "")
+        )
+        print(f"  TUN     : {tun.name} 10.1.19.1/24")
+        print(
+            f"  Ports   : TCP {srv.bound_port}, "
+            f"UDP {srv.discovery_bound_port}"
+        )
+        print(
+            "  Phone   : connect to the laptop hotspot, open PdaNet+, then "
+            "choose 'Connect to a PdaNet Hotspot'."
+        )
+        print("Press Ctrl+C to stop.")
+        try:
+            srv.wait()
+        except KeyboardInterrupt:
+            print("\nstopping reverse PdaNet server...", file=sys.stderr)
+        return 0
+    finally:
+        if srv is not None:
+            srv.stop()
+        if tun is not None:
+            tun.close()
+        if started_hotspot and not args.keep_hotspot:
+            try:
+                wifi.share_stop()
+            except wifi.WifiError as exc:
+                print(f"warning: could not stop the hotspot: {exc}", file=sys.stderr)
+        state = _read_serve_state()
+        if state is not None and int(state.get("pid") or 0) == os.getpid():
+            _remove_serve_state()
+        signal.signal(signal.SIGTERM, previous_sigterm)
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    if args.serve_action == "status":
+        return _serve_status()
+    if args.serve_action == "stop":
+        return _serve_stop()
+    return _serve_start(args)
 
 
 def cmd_doctor(_args: argparse.Namespace) -> int:
@@ -331,6 +664,17 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     print(f"ip: {shutil.which('ip') or 'MISSING'}")
     print(f"resolvectl: {shutil.which('resolvectl') or 'not available (DNS left unchanged)'}")
     print(f"nmcli: {shutil.which('nmcli') or 'not installed (WiFi pairing/share unavailable)'}")
+    print(f"iptables: {shutil.which('iptables') or 'not installed (reverse PdaNet unavailable)'}")
+    try:
+        with open(netconfig.IP_FORWARD_PATH, encoding="ascii") as handle:
+            forwarding = handle.read().strip()
+        print(f"ip_forward: {forwarding or 'unknown'}")
+    except OSError as exc:
+        print(f"ip_forward: unreadable ({exc})")
+    print(
+        "ip_forward crash marker: "
+        + ("present" if os.path.exists(netconfig.IP_FORWARD_STATE_PATH) else "absent")
+    )
     print(f"notify-send: {shutil.which('notify-send') or 'not installed (GUI notifications disabled)'}")
     bt_info = bt.status()
     print(f"bluetoothctl: {bt_info['bluetoothctl'] or 'MISSING'}")
@@ -498,6 +842,63 @@ def build_parser() -> argparse.ArgumentParser:
     p_share_status = share_sub.add_parser("status", help="show hotspot state")
     p_share_status.set_defaults(func=cmd_share)
 
+    p_serve = sub.add_parser(
+        "serve",
+        help="run a reverse PdaNet server (a phone uses this computer's "
+             "Internet through PdaNet client mode)",
+    )
+    serve_sub = p_serve.add_subparsers(dest="serve_action", required=True)
+    p_serve_start = serve_sub.add_parser(
+        "start", help="start the hotspot, TUN and reverse PdaNet server"
+    )
+    p_serve_start.add_argument("--ssid", default="PdaNet Laptop",
+                               help="hotspot name (default: PdaNet Laptop)")
+    p_serve_start.add_argument("-p", "--password",
+                               help="WPA2 password (default: generated)")
+    p_serve_start.add_argument("--interface",
+                               help="Wi-Fi interface for the hotspot "
+                                    "(default: auto)")
+    p_serve_start.add_argument("--no-hotspot", action="store_true",
+                               help="use the existing pdanet-share hotspot "
+                                    "instead of creating one")
+    p_serve_start.add_argument("--keep-hotspot", action="store_true",
+                               help="leave the hotspot active on exit")
+    p_serve_start.add_argument("--listen", default="0.0.0.0",
+                               help="TCP listen address (default: 0.0.0.0)")
+    p_serve_start.add_argument("--port", type=int,
+                               default=pdanet_server.DEFAULT_TCP_PORT,
+                               help="TCP port (default: 8740)")
+    p_serve_start.add_argument("--discovery-port", type=int,
+                               default=pdanet_server.DEFAULT_DISCOVERY_PORT,
+                               help="UDP discovery port (default: 8000)")
+    p_serve_start.add_argument("--tun", default=netconfig.DEFAULT_TUN,
+                               help="TUN interface name (default: pdanet0)")
+    p_serve_start.add_argument("--mtu", type=int, default=netconfig.DEFAULT_MTU)
+    p_serve_start.add_argument("--name",
+                               help="server name shown by PdaNet "
+                                    "(default: hostname)")
+    p_serve_start.add_argument("--allow", action="append", default=[],
+                               metavar="CIDR",
+                               help="extra client subnet allowed to connect "
+                                    "(can be repeated)")
+    p_serve_start.add_argument("--no-nat", action="store_true",
+                               help="do not add iptables MASQUERADE rules")
+    p_serve_start.add_argument("--privilege",
+                               choices=["auto", "pkexec", "sudo", "root"],
+                               default="auto",
+                               help="how to obtain CAP_NET_ADMIN")
+    p_serve_start.add_argument("-v", "--verbose", action="store_true",
+                               help="log every IP packet (slow)")
+    p_serve_start.set_defaults(func=cmd_serve)
+    p_serve_status = serve_sub.add_parser(
+        "status", help="show reverse server state"
+    )
+    p_serve_status.set_defaults(func=cmd_serve)
+    p_serve_stop = serve_sub.add_parser(
+        "stop", help="stop a reverse server started by 'serve start'"
+    )
+    p_serve_stop.set_defaults(func=cmd_serve)
+
     p_doc = sub.add_parser("doctor", help="check the local environment")
     p_doc.set_defaults(func=cmd_doctor)
 
@@ -523,6 +924,7 @@ def main(argv: list[str] | None = None) -> int:
         bt.BluetoothError,
         privileges.PrivilegeError,
         netconfig.NetConfigError,
+        pdanet_server.ServerError,
         wifi.WifiError,
         ValueError,
     ) as exc:

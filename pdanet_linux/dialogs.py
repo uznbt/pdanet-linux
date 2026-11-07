@@ -8,8 +8,11 @@ through ``GLib.idle_add``.
 from __future__ import annotations
 
 import os
+import secrets
+import socket
 import subprocess
 import threading
+import time
 from typing import Callable
 
 import gi
@@ -19,7 +22,15 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
-from . import bt, config, selftest, wifi  # noqa: E402
+from . import (  # noqa: E402
+    bt,
+    config,
+    netconfig,
+    privileges,
+    selftest,
+    server as pdanet_server,
+    wifi,
+)
 
 
 def _background(
@@ -251,9 +262,17 @@ class HelpDialog(Adw.Dialog):
              "discoverable, then use Bluetooth Pairing... to scan, pair and "
              "trust it. Linux discovers the 'PdaNet Server' RFCOMM channel."),
             ("WiFi Share",
-             "Turns this computer into a WPA2 hotspot and shares the PdaNet "
-             "tunnel with other devices (NetworkManager shared IPv4). The "
-             "Wi-Fi adapter must support AP mode."),
+             "Turns this computer into a WPA2 hotspot and shares its current "
+             "Internet connection (Ethernet, Wi-Fi or PdaNet) with other "
+             "devices using NetworkManager shared IPv4. The Wi-Fi adapter "
+             "must support AP mode. The receiving device does not need "
+             "PdaNet client mode."),
+            ("Reverse PdaNet",
+             "The opposite direction: this computer creates a hotspot and "
+             "runs a PdaNet server, while the phone uses PdaNet+'s 'Connect "
+             "to a PdaNet Hotspot' mode. The laptop needs an upstream "
+             "connection and an AP-capable Wi-Fi adapter; one radio cannot "
+             "also join the same phone's hotspot."),
             ("Phone signal",
              "When the phone is reachable through adb (USB debugging), the "
              "dashboard and tray show its operator, LTE/5G technology, bars "
@@ -674,9 +693,11 @@ class WifiShareDialog(Adw.Dialog):
 
         box.append(
             _hint(
-                "Create a WPA2 hotspot on this computer and share the PdaNet "
-                "tunnel with other computers and tablets. NetworkManager "
-                "provides NAT and DNS; the Wi-Fi adapter must support AP mode."
+                "Create a WPA2 hotspot on this computer and share its "
+                "Internet connection (Ethernet, Wi-Fi or PdaNet) with phones "
+                "and tablets. NetworkManager provides NAT and DNS; the Wi-Fi "
+                "adapter must support AP mode. For a phone that should use "
+                "PdaNet's client mode, choose Reverse PdaNet instead."
             )
         )
         self.warning = _hint("")
@@ -736,8 +757,9 @@ class WifiShareDialog(Adw.Dialog):
             self.warning.set_text("")
         except Exception:  # noqa: BLE001 - advisory only
             self.warning.set_text(
-                "No pdanet* tunnel is up. The hotspot can be created, but "
-                "clients will not reach the Internet until PdaNet connects."
+                "No PdaNet tunnel is up. The hotspot can still share any "
+                "other Internet connection on this computer; connect PdaNet "
+                "first if the computer has no Internet of its own."
             )
         return False
 
@@ -759,8 +781,9 @@ class WifiShareDialog(Adw.Dialog):
             self.action_button.add_css_class("destructive-action")
             self.status.set_text("Hotspot is active")
             self.details.set_text(
-                "Clients can now join the hotspot. Traffic is shared through "
-                "the PdaNet tunnel while it is connected."
+                "Clients can now join the hotspot. They use this computer's "
+                "current Internet connection; if PdaNet is connected, the "
+                "traffic follows the PdaNet tunnel."
             )
         else:
             self.action_button.set_label("Activate")
@@ -825,6 +848,371 @@ class WifiShareDialog(Adw.Dialog):
         self.action_button.set_sensitive(True)
         self.status.set_text(message)
         self.status.add_css_class("error")
+
+
+def _wait_for_share_info(timeout: float = 20.0) -> wifi.ShareInfo:
+    deadline = time.monotonic() + timeout
+    last: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            info = wifi.share_info()
+        except wifi.WifiError as exc:
+            last = exc
+            info = None
+        if info is not None:
+            return info
+        time.sleep(0.5)
+    detail = f": {last}" if last else ""
+    raise wifi.WifiError(
+        "the hotspot was activated but did not get an IPv4 address" + detail
+    )
+
+
+class ReverseTetherDialog(Adw.Dialog):
+    """Let a phone use this computer's Internet through PdaNet client mode.
+
+    The dialog owns the hotspot, TUN and server for its lifetime.  Closing it
+    while active stops them, so a stray PdaNet server can never keep running
+    without a visible control.
+    """
+
+    def __init__(
+        self,
+        settings: config.Settings,
+        on_state: Callable[[bool], None] | None = None,
+    ) -> None:
+        super().__init__()
+        self.set_title("Reverse PdaNet")
+        self.set_content_width(620)
+        self.set_content_height(620)
+        self._settings = settings
+        self._on_state = on_state
+        self._active = False
+        self._busy = False
+        self._interfaces: list[wifi.WifiInterface] = []
+        self._tun = None
+        self._server: pdanet_server.PdaNetServer | None = None
+        self._started_hotspot = False
+        self._password = ""
+        self._ssid = ""
+        self._info: wifi.ShareInfo | None = None
+        self._stop_lock = threading.Lock()
+        self._cleaned = True
+        self._closed = False
+        self.connect("closed", self._on_closed)
+
+        toolbar = Adw.ToolbarView()
+        toolbar.add_top_bar(_dialog_header("Reverse PdaNet", self))
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_top(16)
+        box.set_margin_bottom(16)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+        toolbar.set_content(box)
+        self.set_child(toolbar)
+
+        box.append(
+            _hint(
+                "Reverse PdaNet lets a phone use this computer's Internet. "
+                "The phone joins the laptop hotspot, then chooses "
+                "\"Connect to a PdaNet Hotspot\" in PdaNet+. This is the "
+                "opposite direction of the normal PdaNet connection."
+            )
+        )
+        box.append(
+            _hint(
+                "For a phone or tablet that only needs ordinary Wi-Fi, use "
+                "WiFi Share instead; it needs no PdaNet client mode. Reverse "
+                "PdaNet needs its own upstream: a single Wi-Fi adapter "
+                "cannot also be connected to the phone's hotspot."
+            )
+        )
+
+        self.existing = _hint("")
+        box.append(self.existing)
+
+        self.ssid_row = Adw.EntryRow(title="Hotspot name (SSID)")
+        self.ssid_row.set_text(
+            settings.wifi_share_ssid or "PdaNet Laptop"
+        )
+        box.append(self.ssid_row)
+        self.password_row = Adw.PasswordEntryRow(
+            title="Hotspot password (leave blank to generate)"
+        )
+        self.password_row.set_show_apply_button(False)
+        box.append(self.password_row)
+        self.interface_row = Adw.ComboRow(title="Wi-Fi interface")
+        box.append(self.interface_row)
+
+        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.action_button = Gtk.Button(label="Start Reverse PdaNet")
+        self.action_button.add_css_class("suggested-action")
+        self.action_button.add_css_class("pill")
+        self.action_button.connect("clicked", lambda _b: self._toggle())
+        controls.append(self.action_button)
+        self.spinner = Gtk.Spinner()
+        controls.append(self.spinner)
+        self.status = _status_label()
+        self.status.set_hexpand(True)
+        controls.append(self.status)
+        box.append(controls)
+
+        self.details = Gtk.Label(xalign=0)
+        self.details.set_wrap(True)
+        self.details.set_selectable(True)
+        self.details.add_css_class("caption")
+        self.details.add_css_class("dim-label")
+        box.append(self.details)
+
+        copy = Gtk.Button(label="Copy instructions")
+        copy.set_halign(Gtk.Align.START)
+        copy.connect("clicked", lambda _b: self._copy())
+        box.append(copy)
+        box.append(
+            _hint(
+                "Closing this dialog stops the reverse server and the hotspot "
+                "it created. The phone's PdaNet license is still required."
+            )
+        )
+        self._copy_button = copy
+
+        GLib.idle_add(self._load)
+
+    def _load(self) -> bool:
+        try:
+            self._interfaces = wifi.interfaces()
+            info = wifi.share_info()
+        except wifi.WifiError as exc:
+            self._failed(str(exc))
+            return False
+        if self._interfaces:
+            names = [item.name for item in self._interfaces]
+            self.interface_row.set_model(Gtk.StringList.new(names))
+            selected = 0
+            if self._settings.wifi_share_interface in names:
+                selected = names.index(self._settings.wifi_share_interface)
+            self.interface_row.set_selected(selected)
+        else:
+            self.interface_row.set_subtitle("No Wi-Fi interface found")
+            self.action_button.set_sensitive(False)
+        if info is not None:
+            self.existing.set_text(
+                f"An existing hotspot is active on {info.interface} "
+                f"({info.subnet}). It will be reused."
+            )
+            self.ssid_row.set_sensitive(False)
+            self.password_row.set_sensitive(False)
+            self.interface_row.set_sensitive(False)
+        return False
+
+    def _selected_interface(self) -> str | None:
+        if not self._interfaces:
+            return None
+        index = min(
+            self.interface_row.get_selected(), len(self._interfaces) - 1
+        )
+        return self._interfaces[index].name
+
+    def _toggle(self) -> None:
+        if self._busy:
+            return
+        if self._active:
+            self._begin_stop()
+            return
+        ssid = self.ssid_row.get_text().strip()
+        password = self.password_row.get_text()
+        interface = self._selected_interface()
+        if not ssid:
+            self._failed("Enter a network name (SSID).")
+            return
+        if password and not 8 <= len(password) <= 63:
+            self._failed("The WPA2 password must be 8 to 63 characters.")
+            return
+        if interface is None and wifi.share_info() is None:
+            self._failed("No Wi-Fi interface is available.")
+            return
+        self._busy = True
+        self.action_button.set_sensitive(False)
+        self.spinner.start()
+        self.status.set_text("Starting hotspot and reverse server...")
+        self.status.remove_css_class("error")
+        self.details.set_text("")
+        _background(
+            lambda: self._start_work(ssid, password, interface),
+            self._started,
+            self._failed,
+        )
+
+    def _start_work(self, ssid: str, password: str, interface: str | None):
+        info = wifi.share_info()
+        started_hotspot = False
+        generated = ""
+        if info is None:
+            generated = password or secrets.token_urlsafe(9)
+            if not 8 <= len(generated) <= 63:
+                raise wifi.WifiError(
+                    "the WPA2 password must be 8 to 63 characters"
+                )
+            wifi.share_start(ssid, generated, interface=interface)
+            started_hotspot = True
+        try:
+            if info is None:
+                info = _wait_for_share_info()
+            tun = privileges.open_tun(
+                netconfig.make_config(
+                    role=netconfig.ROLE_SERVER,
+                    mtu=self._settings.mtu,
+                    server_nat=True,
+                ),
+                privilege=self._settings.privilege,
+            )
+            try:
+                srv = pdanet_server.PdaNetServer(
+                    tun.fd,
+                    tun_name=tun.name,
+                    server_ip=info.address,
+                    mac=info.mac,
+                    name=socket.gethostname() or "PdaNet Linux",
+                    allowed_networks=[info.network, "127.0.0.0/8"],
+                )
+                srv.start()
+            except Exception:
+                tun.close()
+                raise
+            return tun, srv, info, generated, started_hotspot
+        except Exception:
+            if started_hotspot:
+                try:
+                    wifi.share_stop()
+                except wifi.WifiError:
+                    pass
+            raise
+
+    def _started(self, result: object) -> None:
+        tun, srv, info, password, started_hotspot = result  # type: ignore[misc]
+        self._tun = tun
+        self._server = srv
+        self._info = info
+        self._password = password
+        self._started_hotspot = started_hotspot
+        self._ssid = self.ssid_row.get_text().strip() if started_hotspot else ""
+        self._cleaned = False
+        self._busy = False
+        self._active = True
+        self.spinner.stop()
+        self.action_button.set_sensitive(True)
+        self.action_button.set_label("Stop Reverse PdaNet")
+        self.action_button.remove_css_class("suggested-action")
+        self.action_button.add_css_class("destructive-action")
+        self.ssid_row.set_sensitive(False)
+        self.password_row.set_sensitive(False)
+        self.interface_row.set_sensitive(False)
+        self.status.set_text("Reverse PdaNet server is running")
+        self.status.remove_css_class("error")
+        self._show_instructions()
+        if self._closed:
+            # The dialog was closed while the pkexec prompt or hotspot was
+            # still starting; stop immediately instead of leaving an
+            # invisible server behind.
+            self._begin_stop()
+            return
+        if self._on_state is not None:
+            self._on_state(True)
+
+    def _show_instructions(self) -> None:
+        info = self._info
+        if info is None:
+            return
+        if self._started_hotspot:
+            hotspot = f"{self._ssid} (password: {self._password})"
+        else:
+            hotspot = f"existing hotspot on {info.interface}"
+        self.details.set_text(
+            f"Hotspot: {hotspot}\n"
+            f"Laptop: {info.address} on {info.interface}\n"
+            f"Server: TCP 8740, UDP 8000, TUN 10.1.19.1/24\n\n"
+            "On the phone:\n"
+            "1. Settings > Wi-Fi > connect to the hotspot above.\n"
+            "2. Open PdaNet+ and tap \"Connect to a PdaNet Hotspot\".\n"
+            "3. Approve the VPN request. Internet traffic now goes through "
+            "this computer."
+        )
+
+    def _begin_stop(self) -> None:
+        if self._busy:
+            return
+        self._busy = True
+        self.action_button.set_sensitive(False)
+        self.spinner.start()
+        self.status.set_text("Stopping reverse server...")
+        _background(self._stop_work, self._stopped, self._failed)
+
+    def _stop_work(self) -> bool:
+        with self._stop_lock:
+            if self._cleaned:
+                return False
+            self._cleaned = True
+        srv = self._server
+        tun = self._tun
+        started = self._started_hotspot
+        self._server = None
+        self._tun = None
+        if srv is not None:
+            srv.stop()
+        if tun is not None:
+            tun.close()
+        if started:
+            try:
+                wifi.share_stop()
+            except wifi.WifiError:
+                pass
+        return True
+
+    def _stopped(self, _result: object) -> None:
+        self._busy = False
+        self._active = False
+        self.spinner.stop()
+        self.action_button.set_sensitive(True)
+        self.action_button.set_label("Start Reverse PdaNet")
+        self.action_button.remove_css_class("destructive-action")
+        self.action_button.add_css_class("suggested-action")
+        self.ssid_row.set_sensitive(True)
+        self.password_row.set_sensitive(True)
+        self.interface_row.set_sensitive(True)
+        self.status.set_text("Reverse PdaNet server stopped")
+        self.details.set_text("")
+        if self._on_state is not None:
+            self._on_state(False)
+
+    def _failed(self, message: str) -> None:
+        self._busy = False
+        self.spinner.stop()
+        self.action_button.set_sensitive(True)
+        self.status.set_text(message)
+        self.status.add_css_class("error")
+        if self._active:
+            # The server may still be running; leave the controls usable.
+            pass
+
+    def _on_closed(self, _dialog: Adw.Dialog) -> None:
+        self._closed = True
+        if self._active and not self._busy:
+            # No UI is available anymore; stop quietly in the background.
+            threading.Thread(
+                target=self._stop_work, name="pdanet-reverse-close", daemon=True
+            ).start()
+            if self._on_state is not None:
+                self._on_state(False)
+        # If a start is still in progress, _started() sees _closed and stops
+        # the server as soon as it has been created.
+
+    def _copy(self) -> None:
+        text = self.details.get_text()
+        if not text:
+            text = self.status.get_text()
+        self.get_clipboard().set(text)
+        self.status.set_text("Instructions copied to the clipboard")
+
 
 
 class InternetTestDialog(Adw.Dialog):
