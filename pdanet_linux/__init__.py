@@ -6,5 +6,5 @@ licensing checks; the phone-side app must be running and licensed
 normally.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __app_id__ = "io.github.pdanet.PdaNetLinux"
